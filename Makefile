@@ -146,8 +146,17 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
-HAS_GOLANGCI_VERSION:=$(shell $(GOPATH)/bin/golangci-lint version --format=short)
-.PHONY: golangci
+tooldeps: ## Update tooldeps
+	hack/tooldeps/update.sh
+
+tooldeps-check: ## Check whether tooldeps are out of date
+	rm -rf hack/tooldeps-check
+	cp -a hack/tooldeps hack/tooldeps-check
+	hack/tooldeps-check/update.sh
+	diff -uNr hack/tooldeps hack/tooldeps-check || { echo "tooldeps are out of date. Run 'make tooldeps' to correct"; rm -rf hack/tooldeps-check; false; }
+	rm -rf hack/tooldeps-check
+	echo "tooldeps are current"
+
 golangci: ## Run golangci against code.
 ifneq ($(HAS_GOLANGCI_VERSION), $(GOLANGCI_VERSION))
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v$(GOLANGCI_VERSION)
