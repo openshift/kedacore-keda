@@ -131,7 +131,7 @@ func (h *scaleHandler) DeleteScalableObject(ctx context.Context, scalableObject 
 		}
 		h.recorder.Event(withTriggers, corev1.EventTypeNormal, eventreason.KEDAScalersStopped, "Stopped scalers watch")
 	} else {
-		h.logger.V(1).Info("ScaleObject was not found in controller cache", "key", key)
+		h.logger.V(1).Info("ScaledObject was not found in controller cache", "key", key)
 	}
 
 	return nil
@@ -366,9 +366,9 @@ func buildScaler(ctx context.Context, client client.Client, triggerType string, 
 	case "azure-blob":
 		return scalers.NewAzureBlobScaler(config)
 	case "azure-data-explorer":
-		return scalers.NewAzureDataExplorerScaler(config)
+		return scalers.NewAzureDataExplorerScaler(ctx, config)
 	case "azure-eventhub":
-		return scalers.NewAzureEventHubScaler(config)
+		return scalers.NewAzureEventHubScaler(ctx, config)
 	case "azure-log-analytics":
 		return scalers.NewAzureLogAnalyticsScaler(config)
 	case "azure-monitor":

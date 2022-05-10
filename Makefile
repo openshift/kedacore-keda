@@ -71,7 +71,7 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 .PHONY: get-cluster-context
 get-cluster-context: ## Get Azure cluster context.
-	@az login --service-principal -u $(AZURE_SP_ID) -p "$(AZURE_SP_KEY)" --tenant $(AZURE_SP_TENANT)
+	@az login --service-principal -u $(AZURE_SP_APP_ID) -p "$(AZURE_SP_KEY)" --tenant $(AZURE_SP_TENANT)
 	@az aks get-credentials \
 		--name $(TEST_CLUSTER_NAME) \
 		--subscription $(AZURE_SUBSCRIPTION) \
@@ -167,9 +167,9 @@ pkg/mock/mock_scaling/mock_interface.go: pkg/scaling/scale_handler.go
 	$(MOCKGEN) -destination=$@ -package=mock_scaling -source=$^
 pkg/mock/mock_scaler/mock_scaler.go: pkg/scalers/scaler.go
 	$(MOCKGEN) -destination=$@ -package=mock_scalers -source=$^
-pkg/mock/mock_scale/mock_interfaces.go: $(shell go list -f '{{ .Dir }}' -m k8s.io/client-go)/scale/interfaces.go
+pkg/mock/mock_scale/mock_interfaces.go: $(shell go list -mod=readonly -f '{{ .Dir }}' -m k8s.io/client-go)/scale/interfaces.go
 	$(MOCKGEN) -destination=$@ -package=mock_scale -source=$^
-pkg/mock/mock_client/mock_interfaces.go: $(shell go list -f '{{ .Dir }}' -m sigs.k8s.io/controller-runtime)/pkg/client/interfaces.go
+pkg/mock/mock_client/mock_interfaces.go: $(shell go list -mod=readonly -f '{{ .Dir }}' -m sigs.k8s.io/controller-runtime)/pkg/client/interfaces.go
 	$(MOCKGEN) -destination=$@ -package=mock_client -source=$^
 pkg/scalers/liiklus/mocks/mock_liiklus.go: pkg/scalers/liiklus/LiiklusService.pb.go
 	$(MOCKGEN) -destination=$@ github.com/kedacore/keda/v2/pkg/scalers/liiklus LiiklusServiceClient
@@ -240,6 +240,11 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	$(KUSTOMIZE) edit set image ghcr.io/kedacore/keda=${IMAGE_CONTROLLER}
 	cd config/metrics-server && \
     $(KUSTOMIZE) edit set image ghcr.io/kedacore/keda-metrics-apiserver=${IMAGE_ADAPTER}
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
+		cd config/service_account && \
+		$(KUSTOMIZE) edit add label --force azure.workload.identity/use:true; \
+		$(KUSTOMIZE) edit add annotation --force azure.workload.identity/client-id:${AZURE_SP_APP_ID} azure.workload.identity/tenant-id:${AZURE_SP_TENANT}; \
+	fi
 	# Need this workaround to mitigate a problem with inserting labels into selectors,
 	# until this issue is solved: https://github.com/kubernetes-sigs/kustomize/issues/1009
 	@sed -i".out" -e 's@version:[ ].*@version: $(VERSION)@g' config/default/kustomize-config/metadataLabelTransformer.yaml
@@ -252,11 +257,11 @@ undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/confi
 
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.6.1)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.8.0)
 
 KUSTOMIZE = $(shell pwd)/bin/kustomize
 kustomize: ## Download kustomize locally if necessary.
-	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v3@v3.8.7)
+	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v3@v3.10.0)
 
 ENVTEST = $(shell pwd)/bin/setup-envtest
 envtest: ## Download envtest-setup locally if necessary.
@@ -307,3 +312,7 @@ docker-build-tools: ## Build build-tools image
 .PHONY: publish-build-tools
 publish-build-tools: docker-build-tools ## Publish build-tools image
 	docker push $(IMAGE_BUILD_TOOLS)
+
+.PHONY: docker-build-dev-containers
+docker-build-dev-containers: ## Build dev-containers image
+	docker build -f .devcontainer/Dockerfile .

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gobwas/glob"
 	v2beta2 "k8s.io/api/autoscaling/v2beta2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +30,6 @@ import (
 	"k8s.io/metrics/pkg/apis/external_metrics"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/gobwas/glob"
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/kedacore/keda/v2/pkg/scalers/azure"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -153,8 +153,8 @@ func parseAzureBlobMetadata(config *ScalerConfig) (*azure.BlobMetadata, kedav1al
 		if len(meta.Connection) == 0 {
 			return nil, "", fmt.Errorf("no connection setting given")
 		}
-	case kedav1alpha1.PodIdentityProviderAzure:
-		// If the Use AAD Pod Identity is present then check account name
+	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
+		// If the Use AAD Pod Identity / Workload Identity is present then check account name
 		if val, ok := config.TriggerMetadata["accountName"]; ok && val != "" {
 			meta.AccountName = val
 		} else {
