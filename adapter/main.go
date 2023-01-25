@@ -96,9 +96,31 @@ func (a *Adapter) makeProvider(ctx context.Context, globalHTTPTimeout time.Durat
 		logger.Error(err, "failed to get watch namespace")
 		return nil, nil, fmt.Errorf("failed to get watch namespace (%s)", err)
 	}
+
+	leaseDuration, err := kedautil.ResolveOsEnvDuration("KEDA_METRICS_LEADER_ELECTION_LEASE_DURATION")
+	if err != nil {
+		logger.Error(err, "invalid KEDA_METRICS_LEADER_ELECTION_LEASE_DURATION")
+		return nil, nil, fmt.Errorf("invalid KEDA_METRICS_LEADER_ELECTION_LEASE_DURATION (%s)", err)
+	}
+
+	renewDeadline, err := kedautil.ResolveOsEnvDuration("KEDA_METRICS_LEADER_ELECTION_RENEW_DEADLINE")
+	if err != nil {
+		logger.Error(err, "Invalid KEDA_METRICS_LEADER_ELECTION_RENEW_DEADLINE")
+		return nil, nil, fmt.Errorf("invalid KEDA_METRICS_LEADER_ELECTION_RENEW_DEADLINE (%s)", err)
+	}
+
+	retryPeriod, err := kedautil.ResolveOsEnvDuration("KEDA_METRICS_LEADER_ELECTION_RETRY_PERIOD")
+	if err != nil {
+		logger.Error(err, "Invalid KEDA_METRICS_LEADER_ELECTION_RETRY_PERIOD")
+		return nil, nil, fmt.Errorf("invalid KEDA_METRICS_LEADER_ELECTION_RETRY_PERIOD (%s)", err)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:    scheme,
-		Namespace: namespace,
+		Scheme:        scheme,
+		Namespace:     namespace,
+		LeaseDuration: leaseDuration,
+		RenewDeadline: renewDeadline,
+		RetryPeriod:   retryPeriod,
 	})
 	if err != nil {
 		logger.Error(err, "failed to setup manager")
@@ -172,8 +194,6 @@ func main() {
 	defer klog.Flush()
 	klog.InitFlags(nil)
 
-	printVersion()
-
 	cmd := &Adapter{}
 	cmd.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(generatedopenapi.GetOpenAPIDefinitions, openapinamer.NewDefinitionNamer(scheme.Scheme))
 	cmd.OpenAPIConfig.Info.Title = "keda-adapter"
@@ -188,6 +208,8 @@ func main() {
 	if err := cmd.Flags().Parse(os.Args); err != nil {
 		return
 	}
+
+	printVersion()
 
 	ctrl.SetLogger(logger)
 

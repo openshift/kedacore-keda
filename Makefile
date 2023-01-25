@@ -21,11 +21,15 @@ IMAGE_REPO     ?= kedacore
 IMAGE_CONTROLLER = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
 IMAGE_ADAPTER    = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
 
-IMAGE_BUILD_TOOLS = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/build-tools:main
+BUILD_TOOLS_GO_VERSION = 1.17.13
+IMAGE_BUILD_TOOLS = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/build-tools:$(BUILD_TOOLS_GO_VERSION)
 
 ARCH       ?=amd64
 CGO        ?=0
 TARGET_OS  ?=linux
+
+BUILD_PLATFORMS ?= linux/amd64,linux/arm64
+OUTPUT_TYPE     ?= registry
 
 GIT_VERSION ?= $(shell git describe --always --abbrev=7)
 GIT_COMMIT  ?= $(shell git rev-list -1 HEAD)
@@ -65,30 +69,35 @@ all: build
 ##################################################
 
 ##@ Test
+.PHONY: install-test-deps
+install-test-deps:
+	go install github.com/jstemmer/go-junit-report/v2@latest
 
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
+.PHONY: test
+test: manifests generate fmt vet envtest install-test-deps ## Run tests and export the result to junit format.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -v 2>&1 ./... -coverprofile cover.out | go-junit-report -iocopy -set-exit-code -out report.xml
 
 .PHONY: get-cluster-context
 get-cluster-context: ## Get Azure cluster context.
-	@az login --service-principal -u $(AZURE_SP_APP_ID) -p "$(AZURE_SP_KEY)" --tenant $(AZURE_SP_TENANT)
+	@az login --service-principal -u $(TF_AZURE_SP_APP_ID) -p "$(AZURE_SP_KEY)" --tenant $(TF_AZURE_SP_TENANT)
 	@az aks get-credentials \
 		--name $(TEST_CLUSTER_NAME) \
-		--subscription $(AZURE_SUBSCRIPTION) \
-		--resource-group $(AZURE_RESOURCE_GROUP)
+		--subscription $(TF_AZURE_SUBSCRIPTION) \
+		--resource-group $(TF_AZURE_RESOURCE_GROUP)
 
 .PHONY: e2e-test
 e2e-test: get-cluster-context ## Run e2e tests against Azure cluster.
 	TERMINFO=/etc/terminfo
 	TERM=linux
-	npm install --prefix tests
-
 	./tests/run-all.sh
 
 .PHONY: e2e-test-local
 e2e-test-local: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
-	npm install --prefix tests
 	./tests/run-all.sh
+
+.PHONY: e2e-test-clean-crds
+e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
+	./tests/clean-crds.sh
 
 .PHONY: e2e-test-clean
 e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e2e
@@ -96,7 +105,6 @@ e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e
 
 .PHONY: arm-smoke-test
 arm-smoke-test: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
-	npm install --prefix tests
 	./tests/run-arm-smoke-tests.sh
 
 ##################################################
@@ -157,8 +165,16 @@ clientset-generate: ## Generate client-go clientset, listers and informers.
 	rm -rf vendor
 
 # Generate Liiklus proto
-pkg/scalers/liiklus/LiiklusService.pb.go: hack/LiiklusService.proto
-	protoc -I hack/ hack/LiiklusService.proto --go_out=pkg/scalers/liiklus --go-grpc_out=pkg/scalers/liiklus
+pkg/scalers/liiklus/LiiklusService.pb.go: protoc-gen-go
+	protoc --proto_path=hack LiiklusService.proto --go_out=pkg/scalers/liiklus --go-grpc_out=pkg/scalers/liiklus
+
+# Generate ExternalScaler proto
+pkg/scalers/externalscaler/externalscaler.pb.go: protoc-gen-go
+	protoc --proto_path=pkg/scalers/externalscaler externalscaler.proto --go-grpc_out=pkg/scalers/externalscaler
+
+protoc-gen-go: ## Download protoc-gen-go
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28.1
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2.0
 
 .PHONY: mockgen-gen
 mockgen-gen: mockgen pkg/mock/mock_scaling/mock_interface.go pkg/mock/mock_scaler/mock_scaler.go pkg/mock/mock_scale/mock_interfaces.go pkg/mock/mock_client/mock_interfaces.go pkg/scalers/liiklus/mocks/mock_liiklus.go
@@ -171,7 +187,7 @@ pkg/mock/mock_scale/mock_interfaces.go: $(shell go list -mod=readonly -f '{{ .Di
 	$(MOCKGEN) -destination=$@ -package=mock_scale -source=$^
 pkg/mock/mock_client/mock_interfaces.go: $(shell go list -mod=readonly -f '{{ .Dir }}' -m sigs.k8s.io/controller-runtime)/pkg/client/interfaces.go
 	$(MOCKGEN) -destination=$@ -package=mock_client -source=$^
-pkg/scalers/liiklus/mocks/mock_liiklus.go: pkg/scalers/liiklus/LiiklusService.pb.go
+pkg/scalers/liiklus/mocks/mock_liiklus.go:
 	$(MOCKGEN) -destination=$@ github.com/kedacore/keda/v2/pkg/scalers/liiklus LiiklusServiceClient
 
 ##################################################
@@ -199,9 +215,13 @@ publish: docker-build ## Push images on to Container Registry (default: ghcr.io)
 	docker push $(IMAGE_CONTROLLER)
 	docker push $(IMAGE_ADAPTER)
 
-publish-multiarch:
-	docker buildx build --push --platform=linux/amd64,linux/arm64 . -t ${IMAGE_CONTROLLER} --build-arg BUILD_VERSION=${VERSION} --build-arg GIT_VERSION=${GIT_VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT}
-	docker buildx build --push --platform=linux/amd64,linux/arm64 -f Dockerfile.adapter -t ${IMAGE_ADAPTER} . --build-arg BUILD_VERSION=${VERSION} --build-arg GIT_VERSION=${GIT_VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT}
+publish-controller-multiarch: ## Build and push multi-arch Docker image for KEDA Operator.
+	docker buildx build --output=type=${OUTPUT_TYPE} --platform=${BUILD_PLATFORMS} . -t ${IMAGE_CONTROLLER} --build-arg BUILD_VERSION=${VERSION} --build-arg GIT_VERSION=${GIT_VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT}
+
+publish-adapter-multiarch: ## Build and push multi-arch Docker image for KEDA Metrics Server.
+	docker buildx build --output=type=${OUTPUT_TYPE} --platform=${BUILD_PLATFORMS} -f Dockerfile.adapter -t ${IMAGE_ADAPTER} . --build-arg BUILD_VERSION=${VERSION} --build-arg GIT_VERSION=${GIT_VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT}
+
+publish-multiarch: publish-controller-multiarch publish-adapter-multiarch ## Push multi-arch Docker images on to Container Registry (default: ghcr.io).
 
 release: manifests kustomize set-version ## Produce new KEDA release in keda-$(VERSION).yaml file.
 	cd config/manager && \
@@ -243,7 +263,7 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
 		cd config/service_account && \
 		$(KUSTOMIZE) edit add label --force azure.workload.identity/use:true; \
-		$(KUSTOMIZE) edit add annotation --force azure.workload.identity/client-id:${AZURE_SP_APP_ID} azure.workload.identity/tenant-id:${AZURE_SP_TENANT}; \
+		$(KUSTOMIZE) edit add annotation --force azure.workload.identity/client-id:${TF_AZURE_IDENTITY_1_APP_ID} azure.workload.identity/tenant-id:${TF_AZURE_SP_TENANT}; \
 	fi
 	# Need this workaround to mitigate a problem with inserting labels into selectors,
 	# until this issue is solved: https://github.com/kubernetes-sigs/kustomize/issues/1009
@@ -251,17 +271,17 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	rm -rf config/default/kustomize-config/metadataLabelTransformer.yaml.out
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
 
-undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
+undeploy: e2e-test-clean-crds ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/default | kubectl delete -f -
 
 
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.8.0)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.9.0)
 
 KUSTOMIZE = $(shell pwd)/bin/kustomize
 kustomize: ## Download kustomize locally if necessary.
-	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v3@v3.10.0)
+	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v4@v4.5.5)
 
 ENVTEST = $(shell pwd)/bin/setup-envtest
 envtest: ## Download envtest-setup locally if necessary.
@@ -280,7 +300,7 @@ TMP_DIR=$$(mktemp -d) ;\
 cd $$TMP_DIR ;\
 go mod init tmp ;\
 echo "Downloading $(2)" ;\
-GOBIN=$(PROJECT_DIR)/bin go get $(2) ;\
+GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
 rm -rf $$TMP_DIR ;\
 }
 endef
@@ -307,11 +327,11 @@ help: ## Display this help.
 
 .PHONY: docker-build-tools
 docker-build-tools: ## Build build-tools image
-	docker build -f tools/build-tools.Dockerfile -t $(IMAGE_BUILD_TOOLS) .
+	docker build -f tools/build-tools.Dockerfile -t $(IMAGE_BUILD_TOOLS) --build-arg GO_VERSION=$(BUILD_TOOLS_GO_VERSION) .
 
 .PHONY: publish-build-tools
-publish-build-tools: docker-build-tools ## Publish build-tools image
-	docker push $(IMAGE_BUILD_TOOLS)
+publish-build-tools: ## Build and push multi-arch Docker image for build-tools.
+	docker buildx build --push --platform=${BUILD_PLATFORMS} -f tools/build-tools.Dockerfile -t ${IMAGE_BUILD_TOOLS} --build-arg GO_VERSION=$(BUILD_TOOLS_GO_VERSION) .
 
 .PHONY: docker-build-dev-containers
 docker-build-dev-containers: ## Build dev-containers image

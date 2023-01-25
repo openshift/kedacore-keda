@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 )
 
@@ -101,6 +103,8 @@ var parseServiceBusMetadataDataset = []parseServiceBusMetadataTestData{
 	{map[string]string{"queueName": queueName}, true, queue, "", map[string]string{}, kedav1alpha1.PodIdentityProviderAzureWorkload},
 	// correct workload identity
 	{map[string]string{"queueName": queueName, "namespace": namespaceName}, false, queue, defaultSuffix, map[string]string{}, kedav1alpha1.PodIdentityProviderAzureWorkload},
+	// invalid activation message count
+	{map[string]string{"queueName": queueName, "connectionFromEnv": connectionSetting, "messageCount": messageCount, "activationMessageCount": "AA"}, true, queue, defaultSuffix, map[string]string{}, ""},
 }
 
 var azServiceBusMetricIdentifiers = []azServiceBusMetricIdentifier{
@@ -134,7 +138,7 @@ var getServiceBusLengthTestScalers = []azureServiceBusScaler{
 			topicName:        topicName,
 			subscriptionName: subscriptionName,
 		},
-		podIdentity: kedav1alpha1.PodIdentityProviderAzure,
+		podIdentity: kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderAzure},
 		httpClient:  commonHTTPClient,
 	},
 	{
@@ -143,14 +147,17 @@ var getServiceBusLengthTestScalers = []azureServiceBusScaler{
 			topicName:        topicName,
 			subscriptionName: subscriptionName,
 		},
-		podIdentity: kedav1alpha1.PodIdentityProviderAzureWorkload,
+		podIdentity: kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderAzureWorkload},
 		httpClient:  commonHTTPClient,
 	},
 }
 
 func TestParseServiceBusMetadata(t *testing.T) {
 	for _, testData := range parseServiceBusMetadataDataset {
-		meta, err := parseAzureServiceBusMetadata(&ScalerConfig{ResolvedEnv: sampleResolvedEnv, TriggerMetadata: testData.metadata, AuthParams: testData.authParams, PodIdentity: testData.podIdentity, ScalerIndex: testEventHubScaler.metadata.scalerIndex})
+		meta, err := parseAzureServiceBusMetadata(&ScalerConfig{ResolvedEnv: sampleResolvedEnv,
+			TriggerMetadata: testData.metadata, AuthParams: testData.authParams,
+			PodIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.podIdentity}, ScalerIndex: 0},
+			logr.Discard())
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -203,13 +210,16 @@ func TestGetServiceBusLength(t *testing.T) {
 
 func TestAzServiceBusGetMetricSpecForScaling(t *testing.T) {
 	for _, testData := range azServiceBusMetricIdentifiers {
-		meta, err := parseAzureServiceBusMetadata(&ScalerConfig{ResolvedEnv: connectionResolvedEnv, TriggerMetadata: testData.metadataTestData.metadata, AuthParams: testData.metadataTestData.authParams, PodIdentity: testData.metadataTestData.podIdentity, ScalerIndex: testData.scalerIndex})
+		meta, err := parseAzureServiceBusMetadata(&ScalerConfig{ResolvedEnv: connectionResolvedEnv,
+			TriggerMetadata: testData.metadataTestData.metadata, AuthParams: testData.metadataTestData.authParams,
+			PodIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.metadataTestData.podIdentity}, ScalerIndex: testData.scalerIndex},
+			logr.Discard())
 		if err != nil {
 			t.Fatal("Could not parse metadata:", err)
 		}
 		mockAzServiceBusScalerScaler := azureServiceBusScaler{
 			metadata:    meta,
-			podIdentity: testData.metadataTestData.podIdentity,
+			podIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.metadataTestData.podIdentity},
 			httpClient:  http.DefaultClient,
 		}
 

@@ -4,20 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/x/bsonx"
 	"k8s.io/api/autoscaling/v2beta2"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
@@ -27,6 +27,7 @@ type mongoDBScaler struct {
 	metricType v2beta2.MetricTargetType
 	metadata   *mongoDBMetadata
 	client     *mongo.Client
+	logger     logr.Logger
 }
 
 // mongoDBMetadata specify mongoDB scaler params.
@@ -59,6 +60,9 @@ type mongoDBMetadata struct {
 	// A threshold that is used as targetAverageValue in HPA
 	// +required
 	queryValue int64
+	// A threshold that is used to check if scaler is active
+	// +optional
+	activationQueryValue int64
 	// The name of the metric to use in the Horizontal Pod Autoscaler. This value will be prefixed with "mongodb-".
 	// +optional
 	metricName string
@@ -72,8 +76,6 @@ type mongoDBMetadata struct {
 const (
 	mongoDBDefaultTimeOut = 10 * time.Second
 )
-
-var mongoDBLog = logf.Log.WithName("mongodb_scaler")
 
 // NewMongoDBScaler creates a new mongoDB scaler
 func NewMongoDBScaler(ctx context.Context, config *ScalerConfig) (Scaler, error) {
@@ -104,6 +106,7 @@ func NewMongoDBScaler(ctx context.Context, config *ScalerConfig) (Scaler, error)
 		metricType: metricType,
 		metadata:   meta,
 		client:     client,
+		logger:     InitializeLogger(config, "mongodb_scaler"),
 	}, nil
 }
 
@@ -129,17 +132,27 @@ func parseMongoDBMetadata(config *ScalerConfig) (*mongoDBMetadata, string, error
 	if val, ok := config.TriggerMetadata["queryValue"]; ok {
 		queryValue, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to convert %v to int, because of %v", queryValue, err.Error())
+			return nil, "", fmt.Errorf("failed to convert %v to int, because of %v", val, err.Error())
 		}
 		meta.queryValue = queryValue
 	} else {
 		return nil, "", fmt.Errorf("no queryValue given")
 	}
 
-	meta.dbName, err = GetFromAuthOrMeta(config, "dbName")
+	meta.activationQueryValue = 0
+	if val, ok := config.TriggerMetadata["activationQueryValue"]; ok {
+		activationQueryValue, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to convert %v to int, because of %v", val, err.Error())
+		}
+		meta.activationQueryValue = activationQueryValue
+	}
+
+	dbName, err := GetFromAuthOrMeta(config, "dbName")
 	if err != nil {
 		return nil, "", err
 	}
+	meta.dbName = dbName
 
 	// Resolve connectionString
 	switch {
@@ -149,20 +162,23 @@ func parseMongoDBMetadata(config *ScalerConfig) (*mongoDBMetadata, string, error
 		meta.connectionString = config.ResolvedEnv[config.TriggerMetadata["connectionStringFromEnv"]]
 	default:
 		meta.connectionString = ""
-		meta.host, err = GetFromAuthOrMeta(config, "host")
+		host, err := GetFromAuthOrMeta(config, "host")
 		if err != nil {
 			return nil, "", err
 		}
+		meta.host = host
 
-		meta.port, err = GetFromAuthOrMeta(config, "port")
+		port, err := GetFromAuthOrMeta(config, "port")
 		if err != nil {
 			return nil, "", err
 		}
+		meta.port = port
 
-		meta.username, err = GetFromAuthOrMeta(config, "username")
+		username, err := GetFromAuthOrMeta(config, "username")
 		if err != nil {
 			return nil, "", err
 		}
+		meta.username = username
 
 		if config.AuthParams["password"] != "" {
 			meta.password = config.AuthParams["password"]
@@ -178,9 +194,8 @@ func parseMongoDBMetadata(config *ScalerConfig) (*mongoDBMetadata, string, error
 		connStr = meta.connectionString
 	} else {
 		// Build connection str
-		addr := fmt.Sprintf("%s:%s", meta.host, meta.port)
-		auth := fmt.Sprintf("%s:%s", meta.username, meta.password)
-		connStr = "mongodb://" + auth + "@" + addr + "/" + meta.dbName
+		addr := net.JoinHostPort(meta.host, meta.port)
+		connStr = fmt.Sprintf("mongodb://%s:%s@%s/%s", url.QueryEscape(meta.username), url.QueryEscape(meta.password), addr, meta.dbName)
 	}
 
 	if val, ok := config.TriggerMetadata["metricName"]; ok {
@@ -195,10 +210,10 @@ func parseMongoDBMetadata(config *ScalerConfig) (*mongoDBMetadata, string, error
 func (s *mongoDBScaler) IsActive(ctx context.Context) (bool, error) {
 	result, err := s.getQueryResult(ctx)
 	if err != nil {
-		mongoDBLog.Error(err, fmt.Sprintf("failed to get query result by mongoDB, because of %v", err))
+		s.logger.Error(err, fmt.Sprintf("failed to get query result by mongoDB, because of %v", err))
 		return false, err
 	}
-	return result > 0, nil
+	return result > s.metadata.activationQueryValue, nil
 }
 
 // Close disposes of mongoDB connections
@@ -206,7 +221,7 @@ func (s *mongoDBScaler) Close(ctx context.Context) error {
 	if s.client != nil {
 		err := s.client.Disconnect(ctx)
 		if err != nil {
-			mongoDBLog.Error(err, fmt.Sprintf("failed to close mongoDB connection, because of %v", err))
+			s.logger.Error(err, fmt.Sprintf("failed to close mongoDB connection, because of %v", err))
 			return err
 		}
 	}
@@ -221,13 +236,13 @@ func (s *mongoDBScaler) getQueryResult(ctx context.Context) (int64, error) {
 
 	filter, err := json2BsonDoc(s.metadata.query)
 	if err != nil {
-		mongoDBLog.Error(err, fmt.Sprintf("failed to convert query param to bson.Doc, because of %v", err))
+		s.logger.Error(err, fmt.Sprintf("failed to convert query param to bson.Doc, because of %v", err))
 		return 0, err
 	}
 
 	docsNum, err := s.client.Database(s.metadata.dbName).Collection(s.metadata.collection).CountDocuments(ctx, filter)
 	if err != nil {
-		mongoDBLog.Error(err, fmt.Sprintf("failed to query %v in %v, because of %v", s.metadata.dbName, s.metadata.collection, err))
+		s.logger.Error(err, fmt.Sprintf("failed to query %v in %v, because of %v", s.metadata.dbName, s.metadata.collection, err))
 		return 0, err
 	}
 
@@ -235,17 +250,13 @@ func (s *mongoDBScaler) getQueryResult(ctx context.Context) (int64, error) {
 }
 
 // GetMetrics query from mongoDB,and return to external metrics
-func (s *mongoDBScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+func (s *mongoDBScaler) GetMetrics(ctx context.Context, metricName string, _ labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
 	num, err := s.getQueryResult(ctx)
 	if err != nil {
 		return []external_metrics.ExternalMetricValue{}, fmt.Errorf("failed to inspect momgoDB, because of %v", err)
 	}
 
-	metric := external_metrics.ExternalMetricValue{
-		MetricName: metricName,
-		Value:      *resource.NewQuantity(num, resource.DecimalSI),
-		Timestamp:  metav1.Now(),
-	}
+	metric := GenerateMetricInMili(metricName, float64(num))
 
 	return append([]external_metrics.ExternalMetricValue{}, metric), nil
 }

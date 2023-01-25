@@ -9,23 +9,27 @@ jobs:
     runs-on: ubuntu-latest
     concurrency: e2e-tests
     # build-tools is built from ../../tools/build-tools.Dockerfile
-    container: ghcr.io/kedacore/build-tools:main
+    container: ghcr.io/kedacore/build-tools:1.17.13
     steps:
       - name: Check out code
         uses: actions/checkout@v3
         with:
           fetch-depth: 1
 
+      - name: Register workspace path
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Run end to end test
         env:
           AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
           AZURE_APP_INSIGHTS_APP_ID: ${{ secrets.AZURE_APP_INSIGHTS_APP_ID }}
           AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
           AZURE_APP_INSIGHTS_INSTRUMENTATION_KEY: ${{ secrets.AZURE_APP_INSIGHTS_INSTRUMENTATION_KEY }}
           AZURE_DATA_EXPLORER_DB: ${{ secrets.AZURE_DATA_EXPLORER_DB }}
           AZURE_DATA_EXPLORER_ENDPOINT: ${{ secrets.AZURE_DATA_EXPLORER_ENDPOINT }}
-          AZURE_DEVOPS_BUILD_DEFINITON_ID: ${{ secrets.AZURE_DEVOPS_BUILD_DEFINITON_ID }}
+          AZURE_DEVOPS_BUILD_DEFINITION_ID: ${{ secrets.AZURE_DEVOPS_BUILD_DEFINITION_ID }}
           AZURE_DEVOPS_ORGANIZATION_URL: ${{ secrets.AZURE_DEVOPS_ORGANIZATION_URL }}
           AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
           AZURE_DEVOPS_POOL_NAME: ${{ secrets.AZURE_DEVOPS_POOL_NAME }}
@@ -35,9 +39,13 @@ jobs:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
           AZURE_RUN_WORKLOAD_IDENTITY_TESTS: true
           AZURE_SERVICE_BUS_CONNECTION_STRING:  ${{ secrets.AZURE_SERVICE_BUS_CONNECTION_STRING }}
+          AZURE_SERVICE_BUS_ALTERNATIVE_CONNECTION_STRING:  ${{ secrets.AZURE_SERVICE_BUS_ALTERNATIVE_CONNECTION_STRING }}
           AZURE_SP_APP_ID: ${{ secrets.AZURE_SP_APP_ID }}
           AZURE_SP_OBJECT_ID: ${{ secrets.AZURE_SP_OBJECT_ID }}
           AZURE_SP_KEY: ${{ secrets.AZURE_SP_KEY }}
+          AZURE_SP_ALTERNATIVE_APP_ID: ${{ secrets.AZURE_SP_ALTERNATIVE_APP_ID }}
+          AZURE_SP_ALTERNATIVE_OBJECT_ID: ${{ secrets.AZURE_SP_ALTERNATIVE_OBJECT_ID }}
+          AZURE_SP_ALTERNATIVE_KEY: ${{ secrets.AZURE_SP_ALTERNATIVE_KEY }}
           AZURE_SP_TENANT: ${{ secrets.AZURE_SP_TENANT }}
           AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
           AZURE_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION }}
@@ -79,7 +87,7 @@ jobs:
       - name: Install prerequisites
         run: |
           apt update
-          apt install curl npm make ca-certificates gcc libc-dev -y
+          apt install curl make ca-certificates gcc libc-dev -y
         env:
           DEBIAN_FRONTEND: noninteractive
 

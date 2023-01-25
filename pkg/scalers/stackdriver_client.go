@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
-	timestamp "github.com/golang/protobuf/ptypes/timestamp"
 	"google.golang.org/api/iterator"
 	option "google.golang.org/api/option"
 	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // StackDriverClient is a generic client to fetch metrics from Stackdriver. Can be used
@@ -61,8 +63,110 @@ func NewStackDriverClientPodIdentity(ctx context.Context) (*StackDriverClient, e
 	}, nil
 }
 
+func NewStackdriverAggregator(period int64, aligner string, reducer string) (*monitoringpb.Aggregation, error) {
+	sdAggregation := monitoringpb.Aggregation{
+		AlignmentPeriod: &durationpb.Duration{
+			Seconds: period,
+			Nanos:   0,
+		},
+	}
+
+	var err error
+	sdAggregation.PerSeriesAligner, err = alignerFromString(aligner)
+	if err != nil {
+		return nil, err
+	}
+
+	sdAggregation.CrossSeriesReducer, err = reducerFromString(reducer)
+	if err != nil {
+		return nil, err
+	}
+
+	return &sdAggregation, nil
+}
+
+func alignerFromString(aligner string) (monitoringpb.Aggregation_Aligner, error) {
+	switch strings.ToLower(aligner) {
+	case "", "none":
+		return monitoringpb.Aggregation_ALIGN_NONE, nil
+	case "delta":
+		return monitoringpb.Aggregation_ALIGN_DELTA, nil
+	case "interpolate":
+		return monitoringpb.Aggregation_ALIGN_INTERPOLATE, nil
+	case "next_older":
+		return monitoringpb.Aggregation_ALIGN_NEXT_OLDER, nil
+	case "min":
+		return monitoringpb.Aggregation_ALIGN_MIN, nil
+	case "max":
+		return monitoringpb.Aggregation_ALIGN_MAX, nil
+	case "mean":
+		return monitoringpb.Aggregation_ALIGN_MEAN, nil
+	case "count":
+		return monitoringpb.Aggregation_ALIGN_COUNT, nil
+	case "sum":
+		return monitoringpb.Aggregation_ALIGN_SUM, nil
+	case "stddev":
+		return monitoringpb.Aggregation_ALIGN_STDDEV, nil
+	case "count_true":
+		return monitoringpb.Aggregation_ALIGN_COUNT_TRUE, nil
+	case "count_false":
+		return monitoringpb.Aggregation_ALIGN_COUNT_FALSE, nil
+	case "fraction_true":
+		return monitoringpb.Aggregation_ALIGN_FRACTION_TRUE, nil
+	case "percentile_99":
+		return monitoringpb.Aggregation_ALIGN_PERCENTILE_99, nil
+	case "percentile_95":
+		return monitoringpb.Aggregation_ALIGN_PERCENTILE_95, nil
+	case "percentile_50":
+		return monitoringpb.Aggregation_ALIGN_PERCENTILE_50, nil
+	case "percentile_05":
+		return monitoringpb.Aggregation_ALIGN_PERCENTILE_05, nil
+	case "percent_change":
+		return monitoringpb.Aggregation_ALIGN_PERCENT_CHANGE, nil
+	default:
+	}
+	return monitoringpb.Aggregation_ALIGN_NONE, fmt.Errorf("unknown aligner: %s", aligner)
+}
+
+func reducerFromString(reducer string) (monitoringpb.Aggregation_Reducer, error) {
+	switch strings.ToLower(reducer) {
+	case "", "none":
+		return monitoringpb.Aggregation_REDUCE_NONE, nil
+	case "mean":
+		return monitoringpb.Aggregation_REDUCE_MEAN, nil
+	case "min":
+		return monitoringpb.Aggregation_REDUCE_MIN, nil
+	case "max":
+		return monitoringpb.Aggregation_REDUCE_MAX, nil
+	case "sum":
+		return monitoringpb.Aggregation_REDUCE_SUM, nil
+	case "stddev":
+		return monitoringpb.Aggregation_REDUCE_STDDEV, nil
+	case "count_true":
+		return monitoringpb.Aggregation_REDUCE_COUNT_TRUE, nil
+	case "count_false":
+		return monitoringpb.Aggregation_REDUCE_COUNT_FALSE, nil
+	case "fraction_true":
+		return monitoringpb.Aggregation_REDUCE_FRACTION_TRUE, nil
+	case "percentile_99":
+		return monitoringpb.Aggregation_REDUCE_PERCENTILE_99, nil
+	case "percentile_95":
+		return monitoringpb.Aggregation_REDUCE_PERCENTILE_95, nil
+	case "percentile_50":
+		return monitoringpb.Aggregation_REDUCE_PERCENTILE_50, nil
+	case "percentile_05":
+		return monitoringpb.Aggregation_REDUCE_PERCENTILE_05, nil
+	default:
+	}
+	return monitoringpb.Aggregation_REDUCE_NONE, fmt.Errorf("unknown reducer: %s", reducer)
+}
+
 // GetMetrics fetches metrics from stackdriver for a specific filter for the last minute
-func (s StackDriverClient) GetMetrics(ctx context.Context, filter string, projectID string) (int64, error) {
+func (s StackDriverClient) GetMetrics(
+	ctx context.Context,
+	filter string,
+	projectID string,
+	aggregation *monitoringpb.Aggregation) (float64, error) {
 	// Set the start time to 1 minute ago
 	startTime := time.Now().UTC().Add(time.Minute * -2)
 
@@ -73,9 +177,10 @@ func (s StackDriverClient) GetMetrics(ctx context.Context, filter string, projec
 	var req = &monitoringpb.ListTimeSeriesRequest{
 		Filter: filter,
 		Interval: &monitoringpb.TimeInterval{
-			StartTime: &timestamp.Timestamp{Seconds: startTime.Unix()},
-			EndTime:   &timestamp.Timestamp{Seconds: endTime.Unix()},
+			StartTime: &timestamppb.Timestamp{Seconds: startTime.Unix()},
+			EndTime:   &timestamppb.Timestamp{Seconds: endTime.Unix()},
 		},
+		Aggregation: aggregation,
 	}
 
 	switch projectID {
@@ -92,7 +197,7 @@ func (s StackDriverClient) GetMetrics(ctx context.Context, filter string, projec
 	// Get an iterator with the list of time series
 	it := s.metricsClient.ListTimeSeries(ctx, req)
 
-	var value int64 = -1
+	var value float64 = -1
 
 	// Get the value from the first metric returned
 	resp, err := it.Next()
@@ -107,10 +212,26 @@ func (s StackDriverClient) GetMetrics(ctx context.Context, filter string, projec
 
 	if len(resp.GetPoints()) > 0 {
 		point := resp.GetPoints()[0]
-		value = point.GetValue().GetInt64Value()
+		value, err = extractValueFromPoint(point)
+
+		if err != nil {
+			return value, err
+		}
 	}
 
 	return value, nil
+}
+
+// extractValueFromPoint attempts to extract a float64 by asserting the point's value type
+func extractValueFromPoint(point *monitoringpb.Point) (float64, error) {
+	typedValue := point.GetValue()
+	switch typedValue.Value.(type) {
+	case *monitoringpb.TypedValue_DoubleValue:
+		return typedValue.GetDoubleValue(), nil
+	case *monitoringpb.TypedValue_Int64Value:
+		return float64(typedValue.GetInt64Value()), nil
+	}
+	return -1, fmt.Errorf("could not extract value from metric of type %T", typedValue)
 }
 
 // GoogleApplicationCredentials is a struct representing the format of a service account

@@ -122,9 +122,9 @@ to deploy it as part of KEDA. Do the following:
     kubectl logs -l app=keda-metrics-apiserver -n keda -f
     ```
 
-## Debugging
+## Debugging with VS Code
 
-### Using VS Code
+### Operator
 
 Follow these instructions if you want to debug the KEDA operator using VS Code.
 
@@ -133,12 +133,15 @@ Follow these instructions if you want to debug the KEDA operator using VS Code.
    {
     "configurations": [
          {
-            "name": "Launch file",
+            "name": "Launch operator",
             "type": "go",
             "request": "launch",
             "mode": "debug",
             "program": "${workspaceFolder}/main.go",
-            "env": {"WATCH_NAMESPACE": ""}
+            "env": {
+                "WATCH_NAMESPACE": "",
+                "KEDA_CLUSTER_OBJECT_NAMESPACE": "keda"
+            }
         }
     ]
    }
@@ -154,6 +157,71 @@ Follow these instructions if you want to debug the KEDA operator using VS Code.
    ```
 4. Set breakpoints in the code as required.
 5. Select `Run > Start Debugging` or press `F5` to start debugging.
+
+### Metrics server
+
+> **Note:** You will be able to manually query metrics to your local version of the KEDA Metrics server. You won't replace the KEDA Metrics server deployed on the Kubernetes cluster.
+
+Follow these instructions if you want to debug the KEDA metrics server using VS Code.
+
+1. Create a `launch.json` file inside the `.vscode/` folder in the repo with the following configuration:
+   ```json
+   {
+    "configurations": [
+        {
+            "name": "Launch metrics-server",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/adapter/main.go",
+            "env": {
+                "WATCH_NAMESPACE": "",
+                "KEDA_CLUSTER_OBJECT_NAMESPACE": "keda"
+            },
+            "args": [
+                "--authentication-kubeconfig=PATH_TO_YOUR_KUBECONFIG",
+                "--authentication-skip-lookup",
+                "--authorization-kubeconfig=PATH_TO_YOUR_KUBECONFIG",
+                "--lister-kubeconfig=PATH_TO_YOUR_KUBECONFIG",
+                "--secure-port=6443",
+                "--v=5"
+            ],
+        }
+    ]
+   }
+   ```
+   Refer to [this](https://code.visualstudio.com/docs/editor/debugging) for more information about debugging with VS Code.
+2. Deploy CRDs and KEDA into `keda` namespace
+   ```bash
+   make deploy
+   ```
+3. Set breakpoints in the code as required.
+4. Select `Run > Start Debugging` or press `F5` to start debugging.
+
+In order to perform queries against the metrics server, you need to use an authenticated user (with enough permissions) or give permissions over external metrics API to `system:anonymous`.
+
+To grant access over external metrics API to `system:anonymous`, you only need to deploy this manifest (and remove it once you have finished):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+   name: grant-anonymous-access-to-external-metrics
+roleRef:
+   apiGroup: rbac.authorization.k8s.io
+   kind: ClusterRole
+   name: keda-external-metrics-reader
+subjects:
+- kind: User
+  name: system:anonymous
+  namespace: default
+```
+
+**NOTE:** This granting allows to any unauthenticated user to do any operation in external metrics API, this is potentially unsecure, and we strongly discourage doing it on production clusters.
+
+You can query list metrics executing `curl --insecure https://localhost:6443/apis/external.metrics.k8s.io/v1beta1/` or query a specific metrics value executing `curl --insecure https://localhost:6443/apis/external.metrics.k8s.io/v1beta1/namespaces/NAMESPACE/METRIC_NAME` ([similar to the process using `kubectl get --raw`](https://keda.sh/docs/latest/operate/metrics-server/#querying-metrics-exposed-by-keda-metrics-server) but using `curl --insecure https://localhost:6443` instead)
+
+If you prefer to use an authenticated user, you can use a user or service account with access over external metrics API adding their token as authorization header in `curl`, ie: `curl -H "Authorization:Bearer TOKEN" --insecure https://localhost:6443/apis/external.metrics.k8s.io/v1beta1/`
 
 ## Miscellaneous
 
@@ -177,6 +245,21 @@ To change the logging format, find `--zap-encoder=` argument in Operator Deploym
 Allowed values are `json` and `console`
 
 Default value: `console`
+
+To change the logging time encoding, find `--zap-time-encoding=` argument in Operator Deployment section in `config/manager/manager.yaml` file,
+ modify its value and redeploy.
+
+Allowed values are `epoch`, `millis`, `nano`, `iso8601`, `rfc3339` or `rfc3339nano`
+
+Default value: `rfc3339`
+
+> Note: Example of some of the logging time encoding values and the output:
+```
+epoch - 1.6533943565181081e+09
+iso8601 - 2022-05-24T12:10:19.411Z
+rfc3339 - 2022-05-24T12:07:40Z
+rfc3339nano - 2022-05-24T12:10:19.411Z
+```
 
 ### Metrics Server logging
 
