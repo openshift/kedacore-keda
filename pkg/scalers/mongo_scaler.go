@@ -15,7 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/x/bsonx"
-	"k8s.io/api/autoscaling/v2beta2"
+	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
@@ -24,7 +24,7 @@ import (
 
 // mongoDBScaler is support for mongoDB in keda.
 type mongoDBScaler struct {
-	metricType v2beta2.MetricTargetType
+	metricType v2.MetricTargetType
 	metadata   *mongoDBMetadata
 	client     *mongo.Client
 	logger     logr.Logger
@@ -262,17 +262,17 @@ func (s *mongoDBScaler) GetMetrics(ctx context.Context, metricName string, _ lab
 }
 
 // GetMetricSpecForScaling get the query value for scaling
-func (s *mongoDBScaler) GetMetricSpecForScaling(context.Context) []v2beta2.MetricSpec {
-	externalMetric := &v2beta2.ExternalMetricSource{
-		Metric: v2beta2.MetricIdentifier{
+func (s *mongoDBScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
+	externalMetric := &v2.ExternalMetricSource{
+		Metric: v2.MetricIdentifier{
 			Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, s.metadata.metricName),
 		},
 		Target: GetMetricTarget(s.metricType, s.metadata.queryValue),
 	}
-	metricSpec := v2beta2.MetricSpec{
+	metricSpec := v2.MetricSpec{
 		External: externalMetric, Type: externalMetricType,
 	}
-	return []v2beta2.MetricSpec{metricSpec}
+	return []v2.MetricSpec{metricSpec}
 }
 
 // json2BsonDoc convert Json to Bson.Doc

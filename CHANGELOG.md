@@ -55,7 +55,7 @@ To learn more about our roadmap, we recommend reading [this document](ROADMAP.md
 
 ### Breaking Changes
 
-- TODO ([#XXX](https://github.com/kedacore/keda/issue/XXX))
+- **General:** Change API version of HPA from `autoscaling/v2beta2` to `autoscaling/v2` ([#2462](https://github.com/kedacore/keda/issues/2462))
 
 ### Other
 
