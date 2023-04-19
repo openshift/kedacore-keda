@@ -55,6 +55,14 @@ const (
 	storageResource = "https://storage.azure.com/"
 )
 
+var (
+	// ErrAzureConnectionStringKeyName indicates an error in the connection string AccountKey or AccountName.
+	ErrAzureConnectionStringKeyName = errors.New("can't parse storage connection string. Missing key or name")
+
+	// ErrAzureConnectionStringEndpoint indicates an error in the connection string DefaultEndpointsProtocol or EndpointSuffix.
+	ErrAzureConnectionStringEndpoint = errors.New("can't parse storage connection string. Missing DefaultEndpointsProtocol or EndpointSuffix")
+)
+
 // Prefix returns prefix for a StorageEndpointType
 func (e StorageEndpointType) Prefix() string {
 	return [...]string{"BlobEndpoint", "QueueEndpoint", "TableEndpoint", "FileEndpoint"}[e]
@@ -83,7 +91,7 @@ func ParseAzureStorageEndpointSuffix(metadata map[string]string, endpointType St
 func ParseAzureStorageQueueConnection(ctx context.Context, httpClient util.HTTPDoer, podIdentity kedav1alpha1.AuthPodIdentity, connectionString, accountName, endpointSuffix string) (azqueue.Credential, *url.URL, error) {
 	switch podIdentity.Provider {
 	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
-		token, endpoint, err := parseAcessTokenAndEndpoint(ctx, httpClient, accountName, endpointSuffix, podIdentity)
+		token, endpoint, err := parseAccessTokenAndEndpoint(ctx, httpClient, accountName, endpointSuffix, podIdentity)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -111,7 +119,7 @@ func ParseAzureStorageQueueConnection(ctx context.Context, httpClient util.HTTPD
 func ParseAzureStorageBlobConnection(ctx context.Context, httpClient util.HTTPDoer, podIdentity kedav1alpha1.AuthPodIdentity, connectionString, accountName, endpointSuffix string) (azblob.Credential, *url.URL, error) {
 	switch podIdentity.Provider {
 	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
-		token, endpoint, err := parseAcessTokenAndEndpoint(ctx, httpClient, accountName, endpointSuffix, podIdentity)
+		token, endpoint, err := parseAccessTokenAndEndpoint(ctx, httpClient, accountName, endpointSuffix, podIdentity)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -169,7 +177,7 @@ func parseAzureStorageConnectionString(connectionString string, endpointType Sto
 	}
 
 	if name == "" || key == "" {
-		return nil, "", "", errors.New("can't parse storage connection string. Missing key or name")
+		return nil, "", "", ErrAzureConnectionStringKeyName
 	}
 
 	if endpoint != "" {
@@ -181,7 +189,7 @@ func parseAzureStorageConnectionString(connectionString string, endpointType Sto
 	}
 
 	if endpointProtocol == "" || endpointSuffix == "" {
-		return nil, "", "", errors.New("can't parse storage connection string. Missing DefaultEndpointsProtocol or EndpointSuffix")
+		return nil, "", "", ErrAzureConnectionStringEndpoint
 	}
 
 	u, err := url.Parse(fmt.Sprintf("%s://%s.%s.%s", endpointProtocol, name, endpointType.Name(), endpointSuffix))
@@ -192,7 +200,7 @@ func parseAzureStorageConnectionString(connectionString string, endpointType Sto
 	return u, name, key, nil
 }
 
-func parseAcessTokenAndEndpoint(ctx context.Context, httpClient util.HTTPDoer, accountName string, endpointSuffix string,
+func parseAccessTokenAndEndpoint(ctx context.Context, httpClient util.HTTPDoer, accountName string, endpointSuffix string,
 	podIdentity kedav1alpha1.AuthPodIdentity) (string, *url.URL, error) {
 	var token AADToken
 	var err error

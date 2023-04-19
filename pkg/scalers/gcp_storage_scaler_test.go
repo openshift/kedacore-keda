@@ -26,7 +26,7 @@ type gcpGcsMetricIdentifier struct {
 var testGcsMetadata = []parseGcsMetadataTestData{
 	{map[string]string{}, map[string]string{}, true},
 	// all properly formed
-	{nil, map[string]string{"bucketName": "test-bucket", "targetObjectCount": "7", "maxBucketItemsToScan": "100", "credentialsFromEnv": "SAMPLE_CREDS", "activationTargetObjectCount": "5"}, false},
+	{nil, map[string]string{"bucketName": "test-bucket", "targetObjectCount": "7", "maxBucketItemsToScan": "100", "credentialsFromEnv": "SAMPLE_CREDS", "activationTargetObjectCount": "5", "blobPrefix": "blobsubpath", "blobDelimiter": "/"}, false},
 	// all properly formed while using defaults
 	{nil, map[string]string{"bucketName": "test-bucket", "credentialsFromEnv": "SAMPLE_CREDS"}, false},
 	// missing bucketName
@@ -40,9 +40,9 @@ var testGcsMetadata = []parseGcsMetadataTestData{
 	// malformed activationTargetObjectCount
 	{nil, map[string]string{"bucketName": "test-bucket", "credentialsFromEnv": "SAMPLE_CREDS", "activationTargetObjectCount": "A"}, true},
 	// Credentials from AuthParams
-	{map[string]string{"GoogleApplicationCredentials": "Creds", "podIdentityOwner": ""}, map[string]string{"bucketName": "test-bucket", "targetLength": "7"}, false},
+	{map[string]string{"GoogleApplicationCredentials": "Creds"}, map[string]string{"bucketName": "test-bucket", "targetLength": "7"}, false},
 	// Credentials from AuthParams with empty creds
-	{map[string]string{"GoogleApplicationCredentials": "", "podIdentityOwner": ""}, map[string]string{"bucketName": "test-bucket", "subscriptionSize": "7"}, true},
+	{map[string]string{"GoogleApplicationCredentials": ""}, map[string]string{"bucketName": "test-bucket", "subscriptionSize": "7"}, true},
 }
 
 var gcpGcsMetricIdentifiers = []gcpGcsMetricIdentifier{

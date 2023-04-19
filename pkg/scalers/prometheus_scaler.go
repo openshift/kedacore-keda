@@ -13,23 +13,27 @@ import (
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	"github.com/kedacore/keda/v2/pkg/scalers/authentication"
+	"github.com/kedacore/keda/v2/pkg/scalers/azure"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
 const (
-	promServerAddress       = "serverAddress"
-	promMetricName          = "metricName"
+	promServerAddress = "serverAddress"
+
+	// FIXME: DEPRECATED to be removed in v2.12
+	promMetricName = "metricName"
+
 	promQuery               = "query"
 	promThreshold           = "threshold"
 	promActivationThreshold = "activationThreshold"
 	promNamespace           = "namespace"
 	promCortexScopeOrgID    = "cortexOrgID"
-	promCortexHeaderKey     = "X-Scope-OrgID"
+	promCustomHeaders       = "customHeaders"
 	ignoreNullValues        = "ignoreNullValues"
+	unsafeSsl               = "unsafeSsl"
 )
 
 var (
@@ -52,12 +56,13 @@ type prometheusMetadata struct {
 	prometheusAuth      *authentication.AuthMeta
 	namespace           string
 	scalerIndex         int
-	cortexOrgID         string
+	customHeaders       map[string]string
 	// sometimes should consider there is an error we can accept
 	// default value is true/t, to ignore the null value return from prometheus
 	// change to false/f if can not accept prometheus return null values
 	// https://github.com/kedacore/keda/issues/3065
 	ignoreNullValues bool
+	unsafeSsl        bool
 }
 
 type promQueryResult struct {
@@ -76,26 +81,44 @@ type promQueryResult struct {
 func NewPrometheusScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "prometheus_scaler")
 
 	meta, err := parsePrometheusMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing prometheus metadata: %s", err)
+		return nil, fmt.Errorf("error parsing prometheus metadata: %w", err)
 	}
 
-	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false)
+	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, meta.unsafeSsl)
 
-	if meta.prometheusAuth != nil && (meta.prometheusAuth.CA != "" || meta.prometheusAuth.EnableTLS) {
-		// create http.RoundTripper with auth settings from ScalerConfig
-		if httpClient.Transport, err = authentication.CreateHTTPRoundTripper(
-			authentication.NetHTTP,
-			meta.prometheusAuth,
-		); err != nil {
-			logger.V(1).Error(err, "init Prometheus client http transport")
+	if meta.prometheusAuth != nil {
+		if meta.prometheusAuth.CA != "" || meta.prometheusAuth.EnableTLS {
+			// create http.RoundTripper with auth settings from ScalerConfig
+			transport, err := authentication.CreateHTTPRoundTripper(
+				authentication.NetHTTP,
+				meta.prometheusAuth,
+			)
+			if err != nil {
+				logger.V(1).Error(err, "init Prometheus client http transport")
+				return nil, err
+			}
+			httpClient.Transport = transport
+		}
+	} else {
+		// could be the case of azure managed prometheus. Try and get the roundtripper.
+		// If its not the case of azure managed prometheus, we will get both transport and err as nil and proceed assuming no auth.
+		transport, err := azure.TryAndGetAzureManagedPrometheusHTTPRoundTripper(config.PodIdentity, config.TriggerMetadata)
+
+		if err != nil {
+			logger.V(1).Error(err, "error while init Azure Managed Prometheus client http transport")
 			return nil, err
+		}
+
+		// transport should not be nil if its a case of azure managed prometheus
+		if transport != nil {
+			httpClient.Transport = transport
 		}
 	}
 
@@ -122,16 +145,17 @@ func parsePrometheusMetadata(config *ScalerConfig) (meta *prometheusMetadata, er
 		return nil, fmt.Errorf("no %s given", promQuery)
 	}
 
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata[promMetricName]; ok && val != "" {
 		meta.metricName = val
 	} else {
-		return nil, fmt.Errorf("no %s given", promMetricName)
+		meta.metricName = "prometheus"
 	}
 
 	if val, ok := config.TriggerMetadata[promThreshold]; ok && val != "" {
 		t, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing %s: %s", promThreshold, err)
+			return nil, fmt.Errorf("error parsing %s: %w", promThreshold, err)
 		}
 
 		meta.threshold = t
@@ -143,7 +167,7 @@ func parsePrometheusMetadata(config *ScalerConfig) (meta *prometheusMetadata, er
 	if val, ok := config.TriggerMetadata[promActivationThreshold]; ok {
 		t, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationThreshold parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationThreshold parsing error %w", err)
 		}
 
 		meta.activationThreshold = t
@@ -154,7 +178,16 @@ func parsePrometheusMetadata(config *ScalerConfig) (meta *prometheusMetadata, er
 	}
 
 	if val, ok := config.TriggerMetadata[promCortexScopeOrgID]; ok && val != "" {
-		meta.cortexOrgID = val
+		return nil, fmt.Errorf("cortexOrgID is deprecated, please use customHeaders instead")
+	}
+
+	if val, ok := config.TriggerMetadata[promCustomHeaders]; ok && val != "" {
+		customHeaders, err := kedautil.ParseStringList(val)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing %s: %w", promCustomHeaders, err)
+		}
+
+		meta.customHeaders = customHeaders
 	}
 
 	meta.ignoreNullValues = defaultIgnoreNullValues
@@ -167,10 +200,19 @@ func parsePrometheusMetadata(config *ScalerConfig) (meta *prometheusMetadata, er
 		meta.ignoreNullValues = ignoreNullValues
 	}
 
+	meta.unsafeSsl = false
+	if val, ok := config.TriggerMetadata[unsafeSsl]; ok && val != "" {
+		unsafeSslValue, err := strconv.ParseBool(val)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing %s: %w", unsafeSsl, err)
+		}
+
+		meta.unsafeSsl = unsafeSslValue
+	}
+
 	meta.scalerIndex = config.ScalerIndex
 
-	// parse auth configs from ScalerConfig
-	meta.prometheusAuth, err = authentication.GetAuthConfigs(config.TriggerMetadata, config.AuthParams)
+	err = parseAuthConfig(config, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -178,14 +220,19 @@ func parsePrometheusMetadata(config *ScalerConfig) (meta *prometheusMetadata, er
 	return meta, nil
 }
 
-func (s *prometheusScaler) IsActive(ctx context.Context) (bool, error) {
-	val, err := s.ExecutePromQuery(ctx)
+func parseAuthConfig(config *ScalerConfig, meta *prometheusMetadata) error {
+	// parse auth configs from ScalerConfig
+	auth, err := authentication.GetAuthConfigs(config.TriggerMetadata, config.AuthParams)
 	if err != nil {
-		s.logger.Error(err, "error executing prometheus query")
-		return false, err
+		return err
 	}
 
-	return val > s.metadata.activationThreshold, nil
+	if auth != nil && config.PodIdentity.Provider != "" {
+		return fmt.Errorf("pod identity cannot be enabled with other auth types")
+	}
+	meta.prometheusAuth = auth
+
+	return nil
 }
 
 func (s *prometheusScaler) Close(context.Context) error {
@@ -221,14 +268,19 @@ func (s *prometheusScaler) ExecutePromQuery(ctx context.Context) (float64, error
 		return -1, err
 	}
 
-	if s.metadata.prometheusAuth != nil && s.metadata.prometheusAuth.EnableBearerAuth {
-		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", s.metadata.prometheusAuth.BearerToken))
-	} else if s.metadata.prometheusAuth != nil && s.metadata.prometheusAuth.EnableBasicAuth {
-		req.SetBasicAuth(s.metadata.prometheusAuth.Username, s.metadata.prometheusAuth.Password)
+	for headerName, headerValue := range s.metadata.customHeaders {
+		req.Header.Add(headerName, headerValue)
 	}
 
-	if s.metadata.cortexOrgID != "" {
-		req.Header.Add(promCortexHeaderKey, s.metadata.cortexOrgID)
+	switch {
+	case s.metadata.prometheusAuth == nil:
+		break
+	case s.metadata.prometheusAuth.EnableBearerAuth:
+		req.Header.Set("Authorization", authentication.GetBearerToken(s.metadata.prometheusAuth))
+	case s.metadata.prometheusAuth.EnableBasicAuth:
+		req.SetBasicAuth(s.metadata.prometheusAuth.Username, s.metadata.prometheusAuth.Password)
+	case s.metadata.prometheusAuth.EnableCustomAuth:
+		req.Header.Set(s.metadata.prometheusAuth.CustomAuthHeader, s.metadata.prometheusAuth.CustomAuthValue)
 	}
 
 	r, err := s.httpClient.Do(req)
@@ -298,14 +350,14 @@ func (s *prometheusScaler) ExecutePromQuery(ctx context.Context) (float64, error
 	return v, nil
 }
 
-func (s *prometheusScaler) GetMetrics(ctx context.Context, metricName string, _ labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+func (s *prometheusScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	val, err := s.ExecutePromQuery(ctx)
 	if err != nil {
 		s.logger.Error(err, "error executing prometheus query")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, val)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, val > s.metadata.activationThreshold, nil
 }

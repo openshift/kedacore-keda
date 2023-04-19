@@ -25,7 +25,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/gobwas/glob"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -53,14 +52,14 @@ type azureBlobScaler struct {
 func NewAzureBlobScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "azure_blob_scaler")
 
 	meta, podIdentity, err := parseAzureBlobMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing azure blob metadata: %s", err)
+		return nil, fmt.Errorf("error parsing azure blob metadata: %w", err)
 	}
 
 	return &azureBlobScaler{
@@ -68,6 +67,7 @@ func NewAzureBlobScaler(config *ScalerConfig) (Scaler, error) {
 		metadata:    meta,
 		podIdentity: podIdentity,
 		httpClient:  kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false),
+		logger:      logger,
 	}, nil
 }
 
@@ -81,7 +81,7 @@ func parseAzureBlobMetadata(config *ScalerConfig, logger logr.Logger) (*azure.Bl
 		blobCount, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing azure blob metadata", "blobCountMetricName", blobCountMetricName)
-			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("error parsing azure blob metadata %s: %s", blobCountMetricName, err.Error())
+			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("error parsing azure blob metadata %s: %w", blobCountMetricName, err)
 		}
 
 		meta.TargetBlobCount = blobCount
@@ -92,7 +92,7 @@ func parseAzureBlobMetadata(config *ScalerConfig, logger logr.Logger) (*azure.Bl
 		activationBlobCount, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing azure blob metadata", activationBlobCountMetricName, activationBlobCountMetricName)
-			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("error parsing azure blob metadata %s: %s", activationBlobCountMetricName, err.Error())
+			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("error parsing azure blob metadata %s: %w", activationBlobCountMetricName, err)
 		}
 
 		meta.ActivationTargetBlobCount = activationBlobCount
@@ -122,7 +122,7 @@ func parseAzureBlobMetadata(config *ScalerConfig, logger logr.Logger) (*azure.Bl
 	if val, ok := config.TriggerMetadata["globPattern"]; ok && val != "" {
 		glob, err := glob.Compile(val)
 		if err != nil {
-			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("invalid glob pattern - %s", err.Error())
+			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("invalid glob pattern - %w", err)
 		}
 		meta.GlobPattern = &glob
 	}
@@ -139,10 +139,11 @@ func parseAzureBlobMetadata(config *ScalerConfig, logger logr.Logger) (*azure.Bl
 	meta.EndpointSuffix = endpointSuffix
 
 	// before triggerAuthentication CRD, pod identity was configured using this property
-	if val, ok := config.TriggerMetadata["useAAdPodIdentity"]; ok && config.PodIdentity.Provider == "" && val == "true" {
+	if val, ok := config.TriggerMetadata["useAAdPodIdentity"]; ok && config.PodIdentity.Provider == "" && val == stringTrue {
 		config.PodIdentity = kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderAzure}
 	}
 
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata["metricName"]; ok {
 		meta.MetricName = kedautil.NormalizeString(fmt.Sprintf("azure-blob-%s", val))
 	} else {
@@ -180,23 +181,6 @@ func parseAzureBlobMetadata(config *ScalerConfig, logger logr.Logger) (*azure.Bl
 	return &meta, config.PodIdentity, nil
 }
 
-// GetScaleDecision is a func
-func (s *azureBlobScaler) IsActive(ctx context.Context) (bool, error) {
-	length, err := azure.GetAzureBlobListLength(
-		ctx,
-		s.httpClient,
-		s.podIdentity,
-		s.metadata,
-	)
-
-	if err != nil {
-		s.logger.Error(err, "error)")
-		return false, err
-	}
-
-	return length > s.metadata.ActivationTargetBlobCount, nil
-}
-
 func (s *azureBlobScaler) Close(context.Context) error {
 	return nil
 }
@@ -212,8 +196,8 @@ func (s *azureBlobScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSp
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *azureBlobScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *azureBlobScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	bloblen, err := azure.GetAzureBlobListLength(
 		ctx,
 		s.httpClient,
@@ -223,10 +207,10 @@ func (s *azureBlobScaler) GetMetrics(ctx context.Context, metricName string, met
 
 	if err != nil {
 		s.logger.Error(err, "error getting blob list length")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(bloblen))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, bloblen > s.metadata.ActivationTargetBlobCount, nil
 }

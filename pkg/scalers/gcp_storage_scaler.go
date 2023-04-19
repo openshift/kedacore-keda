@@ -2,16 +2,15 @@ package scalers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"cloud.google.com/go/storage"
 	"github.com/go-logr/logr"
 	"google.golang.org/api/iterator"
 	option "google.golang.org/api/option"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -39,20 +38,22 @@ type gcsMetadata struct {
 	metricName                  string
 	targetObjectCount           int64
 	activationTargetObjectCount int64
+	blobDelimiter               string
+	blobPrefix                  string
 }
 
 // NewGcsScaler creates a new gcsScaler
 func NewGcsScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "gcp_storage_scaler")
 
 	meta, err := parseGcsMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing GCP storage metadata: %s", err)
+		return nil, fmt.Errorf("error parsing GCP storage metadata: %w", err)
 	}
 
 	ctx := context.Background()
@@ -71,7 +72,7 @@ func NewGcsScaler(config *ScalerConfig) (Scaler, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("storage.NewClient: %v", err)
+		return nil, fmt.Errorf("storage.NewClient: %w", err)
 	}
 
 	bucket := client.Bucket(meta.bucketName)
@@ -111,7 +112,7 @@ func parseGcsMetadata(config *ScalerConfig, logger logr.Logger) (*gcsMetadata, e
 		targetObjectCount, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing targetObjectCount")
-			return nil, fmt.Errorf("error parsing targetObjectCount: %s", err.Error())
+			return nil, fmt.Errorf("error parsing targetObjectCount: %w", err)
 		}
 
 		meta.targetObjectCount = targetObjectCount
@@ -121,7 +122,7 @@ func parseGcsMetadata(config *ScalerConfig, logger logr.Logger) (*gcsMetadata, e
 	if val, ok := config.TriggerMetadata["activationTargetObjectCount"]; ok {
 		activationTargetObjectCount, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationTargetObjectCount parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationTargetObjectCount parsing error %w", err)
 		}
 		meta.activationTargetObjectCount = activationTargetObjectCount
 	}
@@ -130,10 +131,18 @@ func parseGcsMetadata(config *ScalerConfig, logger logr.Logger) (*gcsMetadata, e
 		maxBucketItemsToScan, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing maxBucketItemsToScan")
-			return nil, fmt.Errorf("error parsing maxBucketItemsToScan: %s", err.Error())
+			return nil, fmt.Errorf("error parsing maxBucketItemsToScan: %w", err)
 		}
 
 		meta.maxBucketItemsToScan = maxBucketItemsToScan
+	}
+
+	if val, ok := config.TriggerMetadata["blobDelimiter"]; ok {
+		meta.blobDelimiter = val
+	}
+
+	if val, ok := config.TriggerMetadata["blobPrefix"]; ok {
+		meta.blobPrefix = val
 	}
 
 	auth, err := getGcpAuthorization(config, config.ResolvedEnv)
@@ -146,16 +155,6 @@ func parseGcsMetadata(config *ScalerConfig, logger logr.Logger) (*gcsMetadata, e
 	meta.metricName = GenerateMetricNameWithIndex(config.ScalerIndex, metricName)
 
 	return &meta, nil
-}
-
-// IsActive checks if there are any messages in the subscription
-func (s *gcsScaler) IsActive(ctx context.Context) (bool, error) {
-	items, err := s.getItemCount(ctx, s.metadata.activationTargetObjectCount+1)
-	if err != nil {
-		return false, err
-	}
-
-	return items > s.metadata.activationTargetObjectCount, nil
 }
 
 func (s *gcsScaler) Close(context.Context) error {
@@ -177,21 +176,21 @@ func (s *gcsScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns the number of items in the bucket (up to s.metadata.maxBucketItemsToScan)
-func (s *gcsScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns the number of items in the bucket (up to s.metadata.maxBucketItemsToScan)
+func (s *gcsScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	items, err := s.getItemCount(ctx, s.metadata.maxBucketItemsToScan)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(items))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, items > s.metadata.activationTargetObjectCount, nil
 }
 
 // getItemCount gets the number of items in the bucket, up to maxCount
 func (s *gcsScaler) getItemCount(ctx context.Context, maxCount int64) (int64, error) {
-	query := &storage.Query{Prefix: ""}
+	query := &storage.Query{Delimiter: s.metadata.blobDelimiter, Prefix: s.metadata.blobPrefix}
 	err := query.SetAttrSelection([]string{"Name"})
 	if err != nil {
 		s.logger.Error(err, "failed to set attribute selection")
@@ -207,7 +206,7 @@ func (s *gcsScaler) getItemCount(ctx context.Context, maxCount int64) (int64, er
 			break
 		}
 		if err != nil {
-			if strings.Contains(err.Error(), "bucket doesn't exist") {
+			if errors.Is(err, storage.ErrBucketNotExist) {
 				s.logger.Info("Bucket " + s.metadata.bucketName + " doesn't exist")
 				return 0, nil
 			}

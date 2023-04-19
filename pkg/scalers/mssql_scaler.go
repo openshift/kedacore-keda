@@ -3,7 +3,9 @@ package scalers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 
@@ -11,10 +13,17 @@ import (
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
+)
+
+var (
+	// ErrMsSQLNoQuery is returned when "query" is missing from the config.
+	ErrMsSQLNoQuery = errors.New("no query given")
+
+	// ErrMsSQLNoTargetValue is returned when "targetValue" is missing from the config.
+	ErrMsSQLNoTargetValue = errors.New("no targetValue given")
 )
 
 // mssqlScaler exposes a data pointer to mssqlMetadata and sql.DB connection
@@ -67,19 +76,19 @@ type mssqlMetadata struct {
 func NewMSSQLScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "mssql_scaler")
 
 	meta, err := parseMSSQLMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing mssql metadata: %s", err)
+		return nil, fmt.Errorf("error parsing mssql metadata: %w", err)
 	}
 
 	conn, err := newMSSQLConnection(meta, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error establishing mssql connection: %s", err)
+		return nil, fmt.Errorf("error establishing mssql connection: %w", err)
 	}
 
 	return &mssqlScaler{
@@ -98,18 +107,18 @@ func parseMSSQLMetadata(config *ScalerConfig) (*mssqlMetadata, error) {
 	if val, ok := config.TriggerMetadata["query"]; ok {
 		meta.query = val
 	} else {
-		return nil, fmt.Errorf("no query given")
+		return nil, ErrMsSQLNoQuery
 	}
 
 	// Target query value
 	if val, ok := config.TriggerMetadata["targetValue"]; ok {
 		targetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("targetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("targetValue parsing error %w", err)
 		}
 		meta.targetValue = targetValue
 	} else {
-		return nil, fmt.Errorf("no targetValue given")
+		return nil, ErrMsSQLNoTargetValue
 	}
 
 	// Activation target value
@@ -117,7 +126,7 @@ func parseMSSQLMetadata(config *ScalerConfig) (*mssqlMetadata, error) {
 	if val, ok := config.TriggerMetadata["activationTargetValue"]; ok {
 		activationTargetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationTargetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationTargetValue parsing error %w", err)
 		}
 		meta.activationTargetValue = activationTargetValue
 	}
@@ -132,17 +141,18 @@ func parseMSSQLMetadata(config *ScalerConfig) (*mssqlMetadata, error) {
 		meta.connectionString = ""
 		var err error
 
-		meta.host, err = GetFromAuthOrMeta(config, "host")
+		host, err := GetFromAuthOrMeta(config, "host")
 		if err != nil {
 			return nil, err
 		}
+		meta.host = host
 
 		var paramPort string
 		paramPort, _ = GetFromAuthOrMeta(config, "port")
 		if paramPort != "" {
 			port, err := strconv.Atoi(paramPort)
 			if err != nil {
-				return nil, fmt.Errorf("port parsing error %s", err.Error())
+				return nil, fmt.Errorf("port parsing error %w", err)
 			}
 			meta.port = port
 		}
@@ -160,6 +170,8 @@ func parseMSSQLMetadata(config *ScalerConfig) (*mssqlMetadata, error) {
 	}
 
 	// get the metricName, which can be explicit or from the (masked) connection string
+
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata["metricName"]; ok {
 		meta.metricName = kedautil.NormalizeString(fmt.Sprintf("mssql-%s", val))
 	} else {
@@ -217,7 +229,7 @@ func getMSSQLConnectionString(meta *mssqlMetadata) string {
 		}
 
 		if meta.port > 0 {
-			connectionURL.Host = fmt.Sprintf("%s:%d", meta.host, meta.port)
+			connectionURL.Host = net.JoinHostPort(meta.host, fmt.Sprintf("%d", meta.port))
 		} else {
 			connectionURL.Host = meta.host
 		}
@@ -244,16 +256,16 @@ func (s *mssqlScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns a value for a supported metric or an error if there is a problem getting the metric
-func (s *mssqlScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns a value for a supported metric or an error if there is a problem getting the metric
+func (s *mssqlScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	num, err := s.getQueryResult(ctx)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, fmt.Errorf("error inspecting mssql: %s", err)
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error inspecting mssql: %w", err)
 	}
 
 	metric := GenerateMetricInMili(metricName, num)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, num > s.metadata.activationTargetValue, nil
 }
 
 // getQueryResult returns the result of the scaler query
@@ -269,16 +281,6 @@ func (s *mssqlScaler) getQueryResult(ctx context.Context) (float64, error) {
 	}
 
 	return value, nil
-}
-
-// IsActive returns true if there are pending events to be processed
-func (s *mssqlScaler) IsActive(ctx context.Context) (bool, error) {
-	messages, err := s.getQueryResult(ctx)
-	if err != nil {
-		return false, fmt.Errorf("error inspecting mssql: %s", err)
-	}
-
-	return messages > s.metadata.activationTargetValue, nil
 }
 
 // Close closes the mssql database connections

@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodbstreams/dynamodbstreamsiface"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 )
 
@@ -25,6 +24,7 @@ const (
 	testAWSDynamoDBStreamsSecretAccessKey  = "none"
 	testAWSDynamoDBStreamsSessionToken     = "none"
 	testAWSDynamoDBStreamsRegion           = "ap-northeast-1"
+	testAWSDynamoDBStreamsEndpoint         = "http://localhost:4566"
 	testAWSDynamoDBStreamsArnForSmallTable = "smallstreamarn"
 	testAWSDynamoDBStreamsArnForBigTable   = "bigstreamarn"
 	testAWSDynamoDBStreamsErrorArn         = "errorarn"
@@ -139,6 +139,31 @@ var testAwsDynamoDBStreamMetadata = []parseAwsDynamoDBStreamsMetadataTestData{
 			activationTargetShardCount: 1,
 			tableName:                  testAWSDynamoDBSmallTable,
 			awsRegion:                  testAWSDynamoDBStreamsRegion,
+			awsAuthorization: awsAuthorizationMetadata{
+				awsAccessKeyID:     testAWSDynamoDBStreamsAccessKeyID,
+				awsSecretAccessKey: testAWSDynamoDBStreamsSecretAccessKey,
+				podIdentityOwner:   true,
+			},
+			scalerIndex: 0,
+		},
+		isError:     false,
+		comment:     "properly formed dynamodb table name and region",
+		scalerIndex: 0,
+	},
+	{
+		metadata: map[string]string{
+			"tableName":            testAWSDynamoDBSmallTable,
+			"shardCount":           "2",
+			"activationShardCount": "1",
+			"awsRegion":            testAWSDynamoDBStreamsRegion,
+			"awsEndpoint":          testAWSDynamoDBStreamsEndpoint},
+		authParams: testAWSKinesisAuthentication,
+		expected: &awsDynamoDBStreamsMetadata{
+			targetShardCount:           2,
+			activationTargetShardCount: 1,
+			tableName:                  testAWSDynamoDBSmallTable,
+			awsRegion:                  testAWSDynamoDBStreamsRegion,
+			awsEndpoint:                testAWSDynamoDBStreamsEndpoint,
 			awsAuthorization: awsAuthorizationMetadata{
 				awsAccessKeyID:     testAWSDynamoDBStreamsAccessKeyID,
 				awsSecretAccessKey: testAWSDynamoDBStreamsSecretAccessKey,
@@ -388,7 +413,6 @@ func TestAwsDynamoDBStreamsGetMetricSpecForScaling(t *testing.T) {
 }
 
 func TestAwsDynamoDBStreamsScalerGetMetrics(t *testing.T) {
-	var selector labels.Selector
 	for _, meta := range awsDynamoDBStreamsGetMetricTestData {
 		var value []external_metrics.ExternalMetricValue
 		var err error
@@ -397,7 +421,7 @@ func TestAwsDynamoDBStreamsScalerGetMetrics(t *testing.T) {
 		streamArn, err = getDynamoDBStreamsArn(ctx, &mockAwsDynamoDB{}, &meta.tableName)
 		if err == nil {
 			scaler := awsDynamoDBStreamsScaler{"", meta, streamArn, &mockAwsDynamoDBStreams{}, logr.Discard()}
-			value, err = scaler.GetMetrics(context.Background(), "MetricName", selector)
+			value, _, err = scaler.GetMetricsAndActivity(context.Background(), "MetricName")
 		}
 		switch meta.tableName {
 		case testAWSDynamoDBErrorTable:
@@ -421,7 +445,7 @@ func TestAwsDynamoDBStreamsScalerIsActive(t *testing.T) {
 		streamArn, err = getDynamoDBStreamsArn(ctx, &mockAwsDynamoDB{}, &meta.tableName)
 		if err == nil {
 			scaler := awsDynamoDBStreamsScaler{"", meta, streamArn, &mockAwsDynamoDBStreams{}, logr.Discard()}
-			value, err = scaler.IsActive(context.Background())
+			_, value, err = scaler.GetMetricsAndActivity(context.Background(), "MetricName")
 		}
 		switch meta.tableName {
 		case testAWSDynamoDBErrorTable:

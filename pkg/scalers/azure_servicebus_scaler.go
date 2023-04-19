@@ -19,15 +19,13 @@ limitations under the License.
 import (
 	"context"
 	"fmt"
-	"net/http"
+	"regexp"
 	"strconv"
 
-	"github.com/Azure/azure-amqp-common-go/v3/auth"
-	servicebus "github.com/Azure/azure-service-bus-go"
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus/admin"
 	az "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -44,8 +42,6 @@ const (
 	messageCountMetricName                      = "messageCount"
 	activationMessageCountMetricName            = "activationMessageCount"
 	defaultTargetMessageCount                   = 5
-	// Service bus resource id is "https://servicebus.azure.net/" in all cloud environments
-	serviceBusResource = "https://servicebus.azure.net/"
 )
 
 type azureServiceBusScaler struct {
@@ -53,35 +49,37 @@ type azureServiceBusScaler struct {
 	metricType  v2.MetricTargetType
 	metadata    *azureServiceBusMetadata
 	podIdentity kedav1alpha1.AuthPodIdentity
-	httpClient  *http.Client
+	client      *admin.Client
 	logger      logr.Logger
 }
 
 type azureServiceBusMetadata struct {
-	targetLength           int64
-	activationTargetLength int64
-	queueName              string
-	topicName              string
-	subscriptionName       string
-	connection             string
-	entityType             entityType
-	namespace              string
-	endpointSuffix         string
-	scalerIndex            int
+	targetLength            int64
+	activationTargetLength  int64
+	queueName               string
+	topicName               string
+	subscriptionName        string
+	connection              string
+	entityType              entityType
+	fullyQualifiedNamespace string
+	useRegex                bool
+	entityNameRegex         *regexp.Regexp
+	operation               string
+	scalerIndex             int
 }
 
 // NewAzureServiceBusScaler creates a new AzureServiceBusScaler
 func NewAzureServiceBusScaler(ctx context.Context, config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "azure_servicebus_scaler")
 
 	meta, err := parseAzureServiceBusMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing azure service bus metadata: %s", err)
+		return nil, fmt.Errorf("error parsing azure service bus metadata: %w", err)
 	}
 
 	return &azureServiceBusScaler{
@@ -89,7 +87,6 @@ func NewAzureServiceBusScaler(ctx context.Context, config *ScalerConfig) (Scaler
 		metricType:  metricType,
 		metadata:    meta,
 		podIdentity: config.PodIdentity,
-		httpClient:  kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false),
 		logger:      logger,
 	}, nil
 }
@@ -120,6 +117,28 @@ func parseAzureServiceBusMetadata(config *ScalerConfig, logger logr.Logger) (*az
 		meta.activationTargetLength = activationMessageCount
 	}
 
+	meta.useRegex = false
+	if val, ok := config.TriggerMetadata["useRegex"]; ok {
+		useRegex, err := strconv.ParseBool(val)
+		if err != nil {
+			return nil, fmt.Errorf("useRegex has invalid value")
+		}
+		meta.useRegex = useRegex
+	}
+
+	meta.operation = sumOperation
+	if meta.useRegex {
+		if val, ok := config.TriggerMetadata["operation"]; ok {
+			meta.operation = val
+		}
+
+		switch meta.operation {
+		case avgOperation, maxOperation, sumOperation:
+		default:
+			return nil, fmt.Errorf("operation must be one of avg, max, or sum")
+		}
+	}
+
 	// get queue name OR topic and subscription name & set entity type accordingly
 	if val, ok := config.TriggerMetadata["queueName"]; ok {
 		meta.queueName = val
@@ -127,6 +146,16 @@ func parseAzureServiceBusMetadata(config *ScalerConfig, logger logr.Logger) (*az
 
 		if _, ok := config.TriggerMetadata["subscriptionName"]; ok {
 			return nil, fmt.Errorf("subscription name provided with queue name")
+		}
+
+		if meta.useRegex {
+			entityNameRegex, err := regexp.Compile(meta.queueName)
+			if err != nil {
+				return nil, fmt.Errorf("queueName is not a valid regular expression")
+			}
+			entityNameRegex.Longest()
+
+			meta.entityNameRegex = entityNameRegex
 		}
 	}
 
@@ -142,21 +171,21 @@ func parseAzureServiceBusMetadata(config *ScalerConfig, logger logr.Logger) (*az
 		} else {
 			return nil, fmt.Errorf("no subscription name provided with topic name")
 		}
-	}
 
-	envSuffixProvider := func(env az.Environment) (string, error) {
-		return env.ServiceBusEndpointSuffix, nil
-	}
+		if meta.useRegex {
+			entityNameRegex, err := regexp.Compile(meta.subscriptionName)
+			if err != nil {
+				return nil, fmt.Errorf("subscriptionName is not a valid regular expression")
+			}
+			entityNameRegex.Longest()
 
-	endpointSuffix, err := azure.ParseEnvironmentProperty(config.TriggerMetadata, azure.DefaultEndpointSuffixKey, envSuffixProvider)
-	if err != nil {
-		return nil, err
+			meta.entityNameRegex = entityNameRegex
+		}
 	}
-	meta.endpointSuffix = endpointSuffix
-
 	if meta.entityType == none {
 		return nil, fmt.Errorf("no service bus entity type set")
 	}
+
 	switch config.PodIdentity.Provider {
 	case "", kedav1alpha1.PodIdentityProviderNone:
 		// get servicebus connection string
@@ -171,10 +200,19 @@ func parseAzureServiceBusMetadata(config *ScalerConfig, logger logr.Logger) (*az
 		}
 	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
 		if val, ok := config.TriggerMetadata["namespace"]; ok {
-			meta.namespace = val
+			envSuffixProvider := func(env az.Environment) (string, error) {
+				return env.ServiceBusEndpointSuffix, nil
+			}
+
+			endpointSuffix, err := azure.ParseEnvironmentProperty(config.TriggerMetadata, azure.DefaultEndpointSuffixKey, envSuffixProvider)
+			if err != nil {
+				return nil, err
+			}
+			meta.fullyQualifiedNamespace = fmt.Sprintf("%s.%s", val, endpointSuffix)
 		} else {
-			return nil, fmt.Errorf("namespace is required when using pod identity")
+			return nil, fmt.Errorf("namespace are required when using pod identity")
 		}
+
 	default:
 		return nil, fmt.Errorf("azure service bus doesn't support pod identity %s", config.PodIdentity)
 	}
@@ -182,17 +220,6 @@ func parseAzureServiceBusMetadata(config *ScalerConfig, logger logr.Logger) (*az
 	meta.scalerIndex = config.ScalerIndex
 
 	return &meta, nil
-}
-
-// Returns true if the scaler's queue has messages in it, false otherwise
-func (s *azureServiceBusScaler) IsActive(ctx context.Context) (bool, error) {
-	length, err := s.getAzureServiceBusLength(ctx)
-	if err != nil {
-		s.logger.Error(err, "error")
-		return false, err
-	}
-
-	return length > s.metadata.activationTargetLength, nil
 }
 
 // Close - nothing to close for SB
@@ -203,10 +230,18 @@ func (s *azureServiceBusScaler) Close(context.Context) error {
 // Returns the metric spec to be used by the HPA
 func (s *azureServiceBusScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	metricName := ""
+
+	var entityType string
 	if s.metadata.entityType == queue {
 		metricName = s.metadata.queueName
+		entityType = "queue"
 	} else {
 		metricName = s.metadata.topicName
+		entityType = "topic"
+	}
+
+	if s.metadata.useRegex {
+		metricName = fmt.Sprintf("%s-regex", entityType)
 	}
 
 	externalMetric := &v2.ExternalMetricSource{
@@ -219,119 +254,143 @@ func (s *azureServiceBusScaler) GetMetricSpecForScaling(context.Context) []v2.Me
 	return []v2.MetricSpec{metricSpec}
 }
 
-// Returns the current metrics to be served to the HPA
-func (s *azureServiceBusScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns the current metrics to be served to the HPA
+func (s *azureServiceBusScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	queuelen, err := s.getAzureServiceBusLength(ctx)
 
 	if err != nil {
 		s.logger.Error(err, "error getting service bus entity length")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(queuelen))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
-}
-
-type azureTokenProvider struct {
-	httpClient  *http.Client
-	ctx         context.Context
-	podIdentity kedav1alpha1.AuthPodIdentity
-}
-
-// GetToken implements TokenProvider interface for azureTokenProvider
-func (a azureTokenProvider) GetToken(uri string) (*auth.Token, error) {
-	ctx := a.ctx
-
-	var token azure.AADToken
-	var err error
-
-	switch a.podIdentity.Provider {
-	case kedav1alpha1.PodIdentityProviderAzure:
-		token, err = azure.GetAzureADPodIdentityToken(ctx, a.httpClient, a.podIdentity.IdentityID, serviceBusResource)
-	case kedav1alpha1.PodIdentityProviderAzureWorkload:
-		token, err = azure.GetAzureADWorkloadIdentityToken(ctx, a.podIdentity.IdentityID, serviceBusResource)
-	default:
-		err = fmt.Errorf("unknown pod identity provider")
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return auth.NewToken(auth.CBSTokenTypeJWT, token.AccessToken, token.ExpiresOn), nil
+	return []external_metrics.ExternalMetricValue{metric}, queuelen > s.metadata.activationTargetLength, nil
 }
 
 // Returns the length of the queue or subscription
 func (s *azureServiceBusScaler) getAzureServiceBusLength(ctx context.Context) (int64, error) {
-	// get namespace
-	namespace, err := s.getServiceBusNamespace(ctx)
+	// get adminClient
+	adminClient, err := s.getServiceBusAdminClient()
 	if err != nil {
 		return -1, err
 	}
 	// switch case for queue vs topic here
 	switch s.metadata.entityType {
 	case queue:
-		return getQueueEntityFromNamespace(ctx, namespace, s.metadata.queueName)
+		return getQueueLength(ctx, adminClient, s.metadata)
 	case subscription:
-		return getSubscriptionEntityFromNamespace(ctx, namespace, s.metadata.topicName, s.metadata.subscriptionName)
+		return getSubscriptionLength(ctx, adminClient, s.metadata)
 	default:
 		return -1, fmt.Errorf("no entity type")
 	}
 }
 
 // Returns service bus namespace object
-func (s *azureServiceBusScaler) getServiceBusNamespace(ctx context.Context) (*servicebus.Namespace, error) {
-	var namespace *servicebus.Namespace
+func (s *azureServiceBusScaler) getServiceBusAdminClient() (*admin.Client, error) {
+	if s.client != nil {
+		return s.client, nil
+	}
 	var err error
-
+	var client *admin.Client
 	switch s.podIdentity.Provider {
 	case "", kedav1alpha1.PodIdentityProviderNone:
-		namespace, err = servicebus.NewNamespace(servicebus.NamespaceWithConnectionString(s.metadata.connection))
-		if err != nil {
-			return namespace, err
-		}
+		client, err = admin.NewClientFromConnectionString(s.metadata.connection, nil)
 	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
-		namespace, err = servicebus.NewNamespace()
+		creds, chainedErr := azure.NewChainedCredential(s.podIdentity.IdentityID, s.podIdentity.Provider)
+		if chainedErr != nil {
+			return nil, chainedErr
+		}
+		client, err = admin.NewClient(s.metadata.fullyQualifiedNamespace, creds, nil)
+	default:
+		err = fmt.Errorf("incorrect podIdentity type")
+	}
+
+	s.client = client
+	return client, err
+}
+
+func getQueueLength(ctx context.Context, adminClient *admin.Client, meta *azureServiceBusMetadata) (int64, error) {
+	if !meta.useRegex {
+		queueEntity, err := adminClient.GetQueueRuntimeProperties(ctx, meta.queueName, &admin.GetQueueRuntimePropertiesOptions{})
 		if err != nil {
-			return namespace, err
+			return -1, err
 		}
-		namespace.TokenProvider = azureTokenProvider{
-			ctx:         ctx,
-			httpClient:  s.httpClient,
-			podIdentity: s.podIdentity,
+		if queueEntity == nil {
+			return -1, fmt.Errorf("queue %s doesn't exist", meta.queueName)
 		}
-		namespace.Name = s.metadata.namespace
+
+		return int64(queueEntity.ActiveMessageCount), nil
 	}
 
-	namespace.Suffix = s.metadata.endpointSuffix
-	return namespace, nil
+	messageCounts := make([]int64, 0)
+
+	queuePager := adminClient.NewListQueuesRuntimePropertiesPager(nil)
+	for queuePager.More() {
+		page, err := queuePager.NextPage(ctx)
+		if err != nil {
+			return -1, err
+		}
+
+		for _, queue := range page.QueueRuntimeProperties {
+			if meta.entityNameRegex.FindString(queue.QueueName) == queue.QueueName {
+				messageCounts = append(messageCounts, int64(queue.ActiveMessageCount))
+			}
+		}
+	}
+
+	return performOperation(messageCounts, meta.operation), nil
 }
 
-func getQueueEntityFromNamespace(ctx context.Context, ns *servicebus.Namespace, queueName string) (int64, error) {
-	// get queue manager from namespace
-	queueManager := ns.NewQueueManager()
+func getSubscriptionLength(ctx context.Context, adminClient *admin.Client, meta *azureServiceBusMetadata) (int64, error) {
+	if !meta.useRegex {
+		subscriptionEntity, err := adminClient.GetSubscriptionRuntimeProperties(ctx, meta.topicName, meta.subscriptionName,
+			&admin.GetSubscriptionRuntimePropertiesOptions{})
+		if err != nil {
+			return -1, err
+		}
+		if subscriptionEntity == nil {
+			return -1, fmt.Errorf("subscription %s doesn't exist in topic %s", meta.subscriptionName, meta.topicName)
+		}
 
-	// queue manager.get(ctx, queueName) -> QueueEntitity
-	queueEntity, err := queueManager.Get(ctx, queueName)
-	if err != nil {
-		return -1, err
+		return int64(subscriptionEntity.ActiveMessageCount), nil
 	}
 
-	return int64(*queueEntity.CountDetails.ActiveMessageCount), nil
+	messageCounts := make([]int64, 0)
+
+	subscriptionPager := adminClient.NewListSubscriptionsRuntimePropertiesPager(meta.topicName, nil)
+	for subscriptionPager.More() {
+		page, err := subscriptionPager.NextPage(ctx)
+		if err != nil {
+			return -1, err
+		}
+
+		for _, subscription := range page.SubscriptionRuntimeProperties {
+			if meta.entityNameRegex.FindString(subscription.SubscriptionName) == subscription.SubscriptionName {
+				messageCounts = append(messageCounts, int64(subscription.ActiveMessageCount))
+			}
+		}
+	}
+
+	return performOperation(messageCounts, meta.operation), nil
 }
 
-func getSubscriptionEntityFromNamespace(ctx context.Context, ns *servicebus.Namespace, topicName, subscriptionName string) (int64, error) {
-	// get subscription manager from namespace
-	subscriptionManager, err := ns.NewSubscriptionManager(topicName)
-	if err != nil {
-		return -1, err
+func performOperation(messageCounts []int64, operation string) int64 {
+	var result int64
+	for _, val := range messageCounts {
+		switch operation {
+		case avgOperation, sumOperation:
+			result += val
+		case maxOperation:
+			if val > result {
+				result = val
+			}
+		}
 	}
 
-	// subscription manager.get(ctx, subName) -> SubscriptionEntity
-	subscriptionEntity, err := subscriptionManager.Get(ctx, subscriptionName)
-	if err != nil {
-		return -1, err
+	total := int64(len(messageCounts))
+	if operation == "avg" && total != 0 {
+		return result / total
 	}
-
-	return int64(*subscriptionEntity.CountDetails.ActiveMessageCount), nil
+	return result
 }

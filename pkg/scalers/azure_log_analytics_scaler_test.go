@@ -198,10 +198,8 @@ func TestLogAnalyticsGetMetricSpecForScaling(t *testing.T) {
 		if err != nil {
 			t.Fatal("Could not parse metadata:", err)
 		}
-		cache := &sessionCache{metricValue: 1, metricThreshold: 2}
 		mockLogAnalyticsScaler := azureLogAnalyticsScaler{
 			metadata:   meta,
-			cache:      cache,
 			name:       "test-so",
 			namespace:  "test-ns",
 			httpClient: http.DefaultClient,
@@ -238,6 +236,41 @@ func TestLogAnalyticsParseMetadataMetricName(t *testing.T) {
 		}
 		if meta.metricName != testData.metricName {
 			t.Errorf("Expected %s but got %s", testData.metricName, meta.metricName)
+		}
+	}
+}
+
+type parseLogAnalyticsMetadataTestUnsafeSsl struct {
+	metadata  map[string]string
+	unsafeSsl bool
+	isError   bool
+}
+
+var testParseMetadataUnsafeSsl = []parseLogAnalyticsMetadataTestUnsafeSsl{
+	// missing unsafessl should return unsafeSsl false
+	{map[string]string{"tenantIdFromEnv": "d248da64-0e1e-4f79-b8c6-72ab7aa055eb", "clientIdFromEnv": "41826dd4-9e0a-4357-a5bd-a88ad771ea7d", "clientSecretFromEnv": "U6DtAX5r6RPZxd~l12Ri3X8J9urt5Q-xs", "workspaceIdFromEnv": "074dd9f8-c368-4220-9400-acb6e80fc325", "query": query, "threshold": "1900000000", "cloud": "azurePublicCloud"}, false, false},
+	// unsafessl = false should return unsafeSsl false
+	{map[string]string{"unsafeSsl": "false", "tenantIdFromEnv": "d248da64-0e1e-4f79-b8c6-72ab7aa055eb", "clientIdFromEnv": "41826dd4-9e0a-4357-a5bd-a88ad771ea7d", "clientSecretFromEnv": "U6DtAX5r6RPZxd~l12Ri3X8J9urt5Q-xs", "workspaceIdFromEnv": "074dd9f8-c368-4220-9400-acb6e80fc325", "query": query, "threshold": "1900000000", "cloud": "azurePublicCloud"}, false, false},
+	// unsafessl = true should return unsafeSsl true
+	{map[string]string{"unsafeSsl": "true", "tenantIdFromEnv": "d248da64-0e1e-4f79-b8c6-72ab7aa055eb", "clientIdFromEnv": "41826dd4-9e0a-4357-a5bd-a88ad771ea7d", "clientSecretFromEnv": "U6DtAX5r6RPZxd~l12Ri3X8J9urt5Q-xs", "workspaceIdFromEnv": "074dd9f8-c368-4220-9400-acb6e80fc325", "query": query, "threshold": "1900000000", "cloud": "azurePublicCloud"}, true, false},
+	// unsafessl is not set to bool value should return error
+	{map[string]string{"unsafeSsl": "14", "tenantIdFromEnv": "d248da64-0e1e-4f79-b8c6-72ab7aa055eb", "clientIdFromEnv": "41826dd4-9e0a-4357-a5bd-a88ad771ea7d", "clientSecretFromEnv": "U6DtAX5r6RPZxd~l12Ri3X8J9urt5Q-xs", "workspaceIdFromEnv": "074dd9f8-c368-4220-9400-acb6e80fc325", "query": query, "threshold": "1900000000", "cloud": "azurePublicCloud"}, false, true},
+}
+
+func TestLogAnalyticsParseMetadataUnsafeSsl(t *testing.T) {
+	for _, testData := range testParseMetadataUnsafeSsl {
+		meta, err := parseAzureLogAnalyticsMetadata(&ScalerConfig{ResolvedEnv: sampleLogAnalyticsResolvedEnv,
+			TriggerMetadata: testData.metadata, AuthParams: nil, PodIdentity: kedav1alpha1.AuthPodIdentity{}})
+		if err != nil && !testData.isError {
+			t.Error("Expected success but got error", err)
+		}
+		if testData.isError && err == nil {
+			t.Error("Expected error but got success")
+		}
+		if meta != nil {
+			if meta.unsafeSsl != testData.unsafeSsl {
+				t.Errorf("Expected unsafeSsl to be %v but got %v", testData.unsafeSsl, meta.unsafeSsl)
+			}
 		}
 	}
 }

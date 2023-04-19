@@ -3,13 +3,13 @@ package scalers
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/gocql/gocql"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -43,19 +43,19 @@ type CassandraMetadata struct {
 func NewCassandraScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "cassandra_scaler")
 
 	meta, err := parseCassandraMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing cassandra metadata: %s", err)
+		return nil, fmt.Errorf("error parsing cassandra metadata: %w", err)
 	}
 
 	session, err := newCassandraSession(meta, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error establishing cassandra session: %s", err)
+		return nil, fmt.Errorf("error establishing cassandra session: %w", err)
 	}
 
 	return &cassandraScaler{
@@ -79,7 +79,7 @@ func parseCassandraMetadata(config *ScalerConfig) (*CassandraMetadata, error) {
 	if val, ok := config.TriggerMetadata["targetQueryValue"]; ok {
 		targetQueryValue, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("targetQueryValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("targetQueryValue parsing error %w", err)
 		}
 		meta.targetQueryValue = targetQueryValue
 	} else {
@@ -90,7 +90,7 @@ func parseCassandraMetadata(config *ScalerConfig) (*CassandraMetadata, error) {
 	if val, ok := config.TriggerMetadata["activationTargetQueryValue"]; ok {
 		activationTargetQueryValue, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationTargetQueryValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationTargetQueryValue parsing error %w", err)
 		}
 		meta.activationTargetQueryValue = activationTargetQueryValue
 	}
@@ -104,17 +104,21 @@ func parseCassandraMetadata(config *ScalerConfig) (*CassandraMetadata, error) {
 	if val, ok := config.TriggerMetadata["port"]; ok {
 		port, err := strconv.Atoi(val)
 		if err != nil {
-			return nil, fmt.Errorf("port parsing error %s", err.Error())
+			return nil, fmt.Errorf("port parsing error %w", err)
 		}
 		meta.port = port
 	}
 
 	if val, ok := config.TriggerMetadata["clusterIPAddress"]; ok {
-		switch p := meta.port; {
-		case p > 0:
-			meta.clusterIPAddress = fmt.Sprintf("%s:%d", val, meta.port)
-		case strings.Contains(val, ":"):
+		splitval := strings.Split(val, ":")
+		port := splitval[len(splitval)-1]
+
+		_, err := strconv.Atoi(port)
+		switch {
+		case err == nil:
 			meta.clusterIPAddress = val
+		case meta.port > 0:
+			meta.clusterIPAddress = net.JoinHostPort(val, fmt.Sprintf("%d", meta.port))
 		default:
 			return nil, fmt.Errorf("no port given")
 		}
@@ -125,7 +129,7 @@ func parseCassandraMetadata(config *ScalerConfig) (*CassandraMetadata, error) {
 	if val, ok := config.TriggerMetadata["protocolVersion"]; ok {
 		protocolVersion, err := strconv.Atoi(val)
 		if err != nil {
-			return nil, fmt.Errorf("protocolVersion parsing error %s", err.Error())
+			return nil, fmt.Errorf("protocolVersion parsing error %w", err)
 		}
 		meta.protocolVersion = protocolVersion
 	} else {
@@ -144,6 +148,7 @@ func parseCassandraMetadata(config *ScalerConfig) (*CassandraMetadata, error) {
 		return nil, fmt.Errorf("no keyspace given")
 	}
 
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata["metricName"]; ok {
 		meta.metricName = kedautil.NormalizeString(fmt.Sprintf("cassandra-%s", val))
 	} else {
@@ -180,18 +185,8 @@ func newCassandraSession(meta *CassandraMetadata, logger logr.Logger) (*gocql.Se
 	return session, nil
 }
 
-// IsActive returns true if there are pending events to be processed.
-func (s *cassandraScaler) IsActive(ctx context.Context) (bool, error) {
-	messages, err := s.GetQueryResult(ctx)
-	if err != nil {
-		return false, fmt.Errorf("error inspecting cassandra: %s", err)
-	}
-
-	return messages > s.metadata.activationTargetQueryValue, nil
-}
-
 // GetMetricSpecForScaling returns the MetricSpec for the Horizontal Pod Autoscaler.
-func (s *cassandraScaler) GetMetricSpecForScaling(ctx context.Context) []v2.MetricSpec {
+func (s *cassandraScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
 			Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, s.metadata.metricName),
@@ -205,16 +200,16 @@ func (s *cassandraScaler) GetMetricSpecForScaling(ctx context.Context) []v2.Metr
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns a value for a supported metric or an error if there is a problem getting the metric.
-func (s *cassandraScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns a value for a supported metric or an error if there is a problem getting the metric.
+func (s *cassandraScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	num, err := s.GetQueryResult(ctx)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, fmt.Errorf("error inspecting cassandra: %s", err)
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error inspecting cassandra: %w", err)
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(num))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, num > s.metadata.activationTargetQueryValue, nil
 }
 
 // GetQueryResult returns the result of the scaler query.

@@ -10,8 +10,10 @@ There are many areas we can use contributions - ranging from code, documentation
 
 - [Project governance](#project-governance)
 - [Getting Help](#getting-help)
+- [Making Breaking Changes](#making-breaking-changes)
 - [Contributing Scalers](#contributing-scalers)
   - [Testing](#testing)
+- [Contributing webhooks](#contributing-webhooks)
 - [Changelog](#changelog)
 - [Including Documentation Changes](#including-documentation-changes)
 - [Creating and building a local environment](#creating-and-building-a-local-environment)
@@ -30,6 +32,10 @@ You can learn about the governance of KEDA [here](https://github.com/kedacore/go
 
 If you have a question about KEDA or how best to contribute, the [#KEDA](https://kubernetes.slack.com/archives/CKZJ36A5D) channel on the Kubernetes slack channel ([get an invite if you don't have one already](https://slack.k8s.io/)) is a good place to start.  We also have regular [community stand-ups](https://github.com/kedacore/keda#community) to track ongoing work and discuss areas of contribution.  For any issues with the product you can [create an issue](https://github.com/kedacore/keda/issues/new) in this repo.
 
+## Making Breaking Changes
+
+All contributions must follow [our deprecation breaking changes policy](https://github.com/kedacore/governance/blob/main/DEPRECATIONS.md).
+
 ## Contributing Scalers
 
 One of the easiest ways to contribute is adding scalers.  Scalers are the logic on when to activate a container (scaling from zero to one) and also how to serve metrics for an event source.  You can view [the code for existing scalers here](https://github.com/kedacore/keda/tree/main/pkg/scalers).  When writing a scaler, please consider:
@@ -38,13 +44,17 @@ One of the easiest ways to contribute is adding scalers.  Scalers are the logic 
 1. Provide tests
 1. Provide [documentation and examples](https://github.com/kedacore/keda-docs#adding-scaler-documentation) for [keda.sh](https://keda.sh)
 
-Information on how scalers work can be found in [`CREATE-NEW-SCALER`](CREATE-NEW-SCALER.md).
+Information on how scalers work can be found in [`CREATE-NEW-SCALER`](CREATE-NEW-SCALER.md) and read our [scaler governance policy](https://github.com/kedacore/governance/blob/main/SCALERS.md).
 
 ### Testing
 
 It is mandatory to provide end-to-end (e2e) tests for new scaler. For more information on e2e testing in KEDA
 check the [test documentation](./tests/README.md). Those tests are run nightly on our
 [CI system](https://github.com/kedacore/keda/actions?query=workflow%3A%22nightly+e2e+test%22).
+
+## Contributing webhooks
+
+Another easy way to contribute is improving the validations to avoid misconfigurations. New rules can be added in the proper type's webhooks file (`apis/keda/v1alpha1/*_webhook.go`).
 
 ## Changelog
 

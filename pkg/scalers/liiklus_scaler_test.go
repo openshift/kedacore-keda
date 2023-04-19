@@ -2,11 +2,12 @@ package scalers
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/golang/mock/gomock"
-	"github.com/pkg/errors"
 
 	"github.com/kedacore/keda/v2/pkg/scalers/liiklus"
 	mock_liiklus "github.com/kedacore/keda/v2/pkg/scalers/liiklus/mocks"
@@ -28,11 +29,11 @@ type liiklusMetricIdentifier struct {
 }
 
 var parseLiiklusMetadataTestDataset = []parseLiiklusMetadataTestData{
-	{map[string]string{}, errors.New("no topic provided"), "", "", "", 0},
-	{map[string]string{"topic": "foo"}, errors.New("no liiklus API address provided"), "", "", "", 0},
-	{map[string]string{"topic": "foo", "address": "bar:6565"}, errors.New("no consumer group provided"), "", "", "", 0},
+	{map[string]string{}, ErrLiiklusNoTopic, "", "", "", 0},
+	{map[string]string{"topic": "foo"}, ErrLiiklusNoAddress, "", "", "", 0},
+	{map[string]string{"topic": "foo", "address": "bar:6565"}, ErrLiiklusNoGroup, "", "", "", 0},
 	{map[string]string{"topic": "foo", "address": "bar:6565", "group": "mygroup"}, nil, "bar:6565", "mygroup", "foo", 10},
-	{map[string]string{"topic": "foo", "address": "bar:6565", "group": "mygroup", "activationLagThreshold": "aa"}, errors.New("error parsing activationLagThreshold: strconv.ParseInt: parsing \"aa\": invalid syntax"), "bar:6565", "mygroup", "foo", 10},
+	{map[string]string{"topic": "foo", "address": "bar:6565", "group": "mygroup", "activationLagThreshold": "aa"}, strconv.ErrSyntax, "bar:6565", "mygroup", "foo", 10},
 	{map[string]string{"topic": "foo", "address": "bar:6565", "group": "mygroup", "lagThreshold": "15"}, nil, "bar:6565", "mygroup", "foo", 15},
 }
 
@@ -52,7 +53,7 @@ func TestLiiklusParseMetadata(t *testing.T) {
 			t.Error("Expected error but got success")
 			continue
 		}
-		if testData.err != nil && err != nil && testData.err.Error() != err.Error() {
+		if testData.err != nil && err != nil && !errors.Is(err, testData.err) {
 			t.Errorf("Expected error %v but got %v", testData.err, err)
 			continue
 		}
@@ -96,7 +97,7 @@ func TestLiiklusScalerActiveBehavior(t *testing.T) {
 		GetEndOffsets(gomock.Any(), gomock.Any()).
 		Return(&liiklus.GetEndOffsetsReply{Offsets: map[uint32]uint64{0: 2}}, nil)
 
-	active, err := scaler.IsActive(context.Background())
+	_, active, err := scaler.GetMetricsAndActivity(context.Background(), "m")
 	if err != nil {
 		t.Errorf("error calling IsActive: %v", err)
 		return
@@ -112,7 +113,7 @@ func TestLiiklusScalerActiveBehavior(t *testing.T) {
 		GetEndOffsets(gomock.Any(), gomock.Any()).
 		Return(&liiklus.GetEndOffsetsReply{Offsets: map[uint32]uint64{0: 2}}, nil)
 
-	active, err = scaler.IsActive(context.Background())
+	_, active, err = scaler.GetMetricsAndActivity(context.Background(), "m")
 	if err != nil {
 		t.Errorf("error calling IsActive: %v", err)
 		return
@@ -140,7 +141,7 @@ func TestLiiklusScalerGetMetricsBehavior(t *testing.T) {
 		GetEndOffsets(gomock.Any(), gomock.Any()).
 		Return(&liiklus.GetEndOffsetsReply{Offsets: map[uint32]uint64{0: 20, 1: 30}}, nil)
 
-	values, err := scaler.GetMetrics(context.Background(), "m", nil)
+	values, _, err := scaler.GetMetricsAndActivity(context.Background(), "m")
 	if err != nil {
 		t.Errorf("error calling IsActive: %v", err)
 		return
@@ -157,7 +158,7 @@ func TestLiiklusScalerGetMetricsBehavior(t *testing.T) {
 	mockClient.EXPECT().
 		GetEndOffsets(gomock.Any(), gomock.Any()).
 		Return(&liiklus.GetEndOffsetsReply{Offsets: map[uint32]uint64{0: 20, 1: 30}}, nil)
-	values, err = scaler.GetMetrics(context.Background(), "m", nil)
+	values, _, err = scaler.GetMetricsAndActivity(context.Background(), "m")
 	if err != nil {
 		t.Errorf("error calling IsActive: %v", err)
 		return

@@ -5,15 +5,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -36,6 +31,7 @@ type awsKinesisStreamMetadata struct {
 	activationTargetShardCount int64
 	streamName                 string
 	awsRegion                  string
+	awsEndpoint                string
 	awsAuthorization           awsAuthorizationMetadata
 	scalerIndex                int
 }
@@ -44,14 +40,14 @@ type awsKinesisStreamMetadata struct {
 func NewAwsKinesisStreamScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "aws_kinesis_stream_scaler")
 
 	meta, err := parseAwsKinesisStreamMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Kinesis stream metadata: %s", err)
+		return nil, fmt.Errorf("error parsing Kinesis stream metadata: %w", err)
 	}
 
 	return &awsKinesisStreamScaler{
@@ -98,6 +94,10 @@ func parseAwsKinesisStreamMetadata(config *ScalerConfig, logger logr.Logger) (*a
 		return nil, fmt.Errorf("no awsRegion given")
 	}
 
+	if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
+		meta.awsEndpoint = val
+	}
+
 	auth, err := getAwsAuthorization(config.AuthParams, config.TriggerMetadata, config.ResolvedEnv)
 	if err != nil {
 		return nil, err
@@ -111,39 +111,11 @@ func parseAwsKinesisStreamMetadata(config *ScalerConfig, logger logr.Logger) (*a
 }
 
 func createKinesisClient(metadata *awsKinesisStreamMetadata) *kinesis.Kinesis {
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region: aws.String(metadata.awsRegion),
-	}))
+	sess, config := getAwsConfig(metadata.awsRegion,
+		metadata.awsEndpoint,
+		metadata.awsAuthorization)
 
-	var kinesisClinent *kinesis.Kinesis
-	if metadata.awsAuthorization.podIdentityOwner {
-		creds := credentials.NewStaticCredentials(metadata.awsAuthorization.awsAccessKeyID, metadata.awsAuthorization.awsSecretAccessKey, metadata.awsAuthorization.awsSessionToken)
-
-		if metadata.awsAuthorization.awsRoleArn != "" {
-			creds = stscreds.NewCredentials(sess, metadata.awsAuthorization.awsRoleArn)
-		}
-
-		kinesisClinent = kinesis.New(sess, &aws.Config{
-			Region:      aws.String(metadata.awsRegion),
-			Credentials: creds,
-		})
-	} else {
-		kinesisClinent = kinesis.New(sess, &aws.Config{
-			Region: aws.String(metadata.awsRegion),
-		})
-	}
-	return kinesisClinent
-}
-
-// IsActive determines if we need to scale from zero
-func (s *awsKinesisStreamScaler) IsActive(ctx context.Context) (bool, error) {
-	count, err := s.GetAwsKinesisOpenShardCount()
-
-	if err != nil {
-		return false, err
-	}
-
-	return count > s.metadata.activationTargetShardCount, nil
+	return kinesis.New(sess, config)
 }
 
 func (s *awsKinesisStreamScaler) Close(context.Context) error {
@@ -161,18 +133,18 @@ func (s *awsKinesisStreamScaler) GetMetricSpecForScaling(context.Context) []v2.M
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *awsKinesisStreamScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *awsKinesisStreamScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	shardCount, err := s.GetAwsKinesisOpenShardCount()
 
 	if err != nil {
 		s.logger.Error(err, "Error getting shard count")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(shardCount))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, shardCount > s.metadata.activationTargetShardCount, nil
 }
 
 // Get Kinesis open shard count

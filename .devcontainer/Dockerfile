@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See https://go.microsoft.com/fwlink/?linkid=2090316 for license information.
 #-------------------------------------------------------------------------------------------------------------
 
-FROM golang:1.17.13
+FROM golang:1.19.7
 
 # Avoid warnings by switching to noninteractive
 ENV DEBIAN_FRONTEND=noninteractive
@@ -50,18 +50,20 @@ RUN apt-get update \
         golang.org/x/tools/cmd/goimports \
         golang.org/x/lint/golint \
         github.com/alecthomas/gometalinter 2>&1 \
-        # github.com/mgechev/revive \  # This pkg deps use generics, we cannot use it till we use go 1.18
-        # github.com/derekparker/delve/cmd/dlv 2>&1 \ # This pkg deps use generics, we cannot use it till we use go 1.18
+        github.com/mgechev/revive \
+        github.com/derekparker/delve/cmd/dlv 2>&1 \
     && go install honnef.co/go/tools/cmd/staticcheck@latest \
     && go install golang.org/x/tools/gopls@latest \
     # Protocol Buffer Compiler
-    && if [ $(dpkg --print-architecture) == "amd64" ]; then PROTOC_ARCH="x86_64"; else PROTOC_ARCH="aarch_64" ; fi \
-    && curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v3.20.1/protoc-3.20.1-linux-$PROTOC_ARCH.zip" \
-    && unzip "protoc-3.20.1-linux-$PROTOC_ARCH.zip" -d $HOME/.local \
+    && PROTOC_VERSION=21.9 \
+    && if [ $(dpkg --print-architecture) = "amd64" ]; then PROTOC_ARCH="x86_64"; else PROTOC_ARCH="aarch_64" ; fi \
+    && curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$PROTOC_ARCH.zip" \
+    && unzip "protoc-${PROTOC_VERSION}-linux-$PROTOC_ARCH.zip" -d $HOME/.local \
     && mv $HOME/.local/bin/protoc /usr/local/bin/protoc \
     && mv $HOME/.local/include/ /usr/local/bin/include/ \
+    && protoc --version \
     # Install golangci-lint
-    && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.46.2 \
+    && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.49.0 \
     #
     # Create a non-root user to use if preferred - see https://aka.ms/vscode-remote/containers/non-root-user.
     && groupadd --gid $USER_GID $USERNAME \
@@ -89,9 +91,12 @@ RUN apt-get update \
 # Enable go modules
 ENV GO111MODULE=on
 
-ENV OPERATOR_RELEASE_VERSION=v1.0.1
-RUN curl -LO https://github.com/operator-framework/operator-sdk/releases/download/${OPERATOR_RELEASE_VERSION}/operator-sdk-${OPERATOR_RELEASE_VERSION}-x86_64-linux-gnu \
-    && chmod +x operator-sdk-${OPERATOR_RELEASE_VERSION}-x86_64-linux-gnu \
+ENV OPERATOR_RELEASE_VERSION=v1.26.0
+RUN ARCH=$(case $(uname -m) in x86_64) echo -n amd64 ;; aarch64) echo -n arm64 ;; *) echo -n $(uname -m) ;; esac) \
+    && OS=$(uname | awk '{print tolower($0)}') \
+    && OPERATOR_SDK_DL_URL=https://github.com/operator-framework/operator-sdk/releases/download/${OPERATOR_RELEASE_VERSION} \
+    && curl -LO ${OPERATOR_SDK_DL_URL}/operator-sdk_${OS}_${ARCH} \
+    && chmod +x operator-sdk_${OS}_${ARCH} \
     && mkdir -p /usr/local/bin/ \
-    && cp operator-sdk-${OPERATOR_RELEASE_VERSION}-x86_64-linux-gnu /usr/local/bin/operator-sdk \
-    && rm operator-sdk-${OPERATOR_RELEASE_VERSION}-x86_64-linux-gnu
+    && cp operator-sdk_${OS}_${ARCH} /usr/local/bin/operator-sdk \
+    && rm operator-sdk_${OS}_${ARCH}

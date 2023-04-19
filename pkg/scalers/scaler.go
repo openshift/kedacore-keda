@@ -18,6 +18,7 @@ package scalers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,7 +28,6 @@ import (
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -42,15 +42,12 @@ func init() {
 
 // Scaler interface
 type Scaler interface {
-
-	// The scaler returns the metric values for a metric Name and criteria matching the selector
-	GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error)
+	// The scaler returns the metric values and activity for a metric Name
+	GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error)
 
 	// Returns the metrics based on which this scaler determines that the ScaleTarget scales. This is used to construct the HPA spec that is created for
 	// this scaled object. The labels used should match the selectors used in GetMetrics
 	GetMetricSpecForScaling(ctx context.Context) []v2.MetricSpec
-
-	IsActive(ctx context.Context) (bool, error)
 
 	// Close any resources that need disposing when scaler is no longer used or destroyed
 	Close(ctx context.Context) error
@@ -78,6 +75,13 @@ type ScalerConfig struct {
 	// The timeout to be used on all HTTP requests from the controller
 	GlobalHTTPTimeout time.Duration
 
+	// Name of the trigger
+	TriggerName string
+
+	// Marks whether we should query metrics only during the polling interval
+	// Any requests for metrics in between are read from the cache
+	TriggerUseCachedMetrics bool
+
 	// TriggerMetadata
 	TriggerMetadata map[string]string
 
@@ -97,6 +101,15 @@ type ScalerConfig struct {
 	MetricType v2.MetricTargetType
 }
 
+var (
+	// ErrScalerUnsupportedUtilizationMetricType is returned when v2.UtilizationMetricType
+	// is provided as the metric target type for scaler.
+	ErrScalerUnsupportedUtilizationMetricType = errors.New("'Utilization' metric type is unsupported for external metrics, allowed values are 'Value' or 'AverageValue'")
+
+	// ErrScalerConfigMissingField is returned when a required field is missing from the scaler config.
+	ErrScalerConfigMissingField = errors.New("missing required field in scaler config")
+)
+
 // GetFromAuthOrMeta helps getting a field from Auth or Meta sections
 func GetFromAuthOrMeta(config *ScalerConfig, field string) (string, error) {
 	var result string
@@ -107,7 +120,7 @@ func GetFromAuthOrMeta(config *ScalerConfig, field string) (string, error) {
 		result = config.TriggerMetadata[field]
 	}
 	if result == "" {
-		err = fmt.Errorf("no %s given", field)
+		err = fmt.Errorf("%w: no %s given", ErrScalerConfigMissingField, field)
 	}
 	return result, err
 }
@@ -140,7 +153,7 @@ func InitializeLogger(config *ScalerConfig, scalerName string) logr.Logger {
 func GetMetricTargetType(config *ScalerConfig) (v2.MetricTargetType, error) {
 	switch config.MetricType {
 	case v2.UtilizationMetricType:
-		return "", fmt.Errorf("'Utilization' metric type is unsupported for external metrics, allowed values are 'Value' or 'AverageValue'")
+		return "", ErrScalerUnsupportedUtilizationMetricType
 	case "":
 		// Use AverageValue if no metric type was provided
 		return v2.AverageValueMetricType, nil

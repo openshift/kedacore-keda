@@ -17,13 +17,13 @@ import (
 )
 
 const (
-	authModesKey = "authModes"
+	AuthModesKey = "authModes"
 )
 
 func GetAuthConfigs(triggerMetadata, authParams map[string]string) (out *AuthMeta, err error) {
 	out = &AuthMeta{}
 
-	authModes, ok := triggerMetadata[authModesKey]
+	authModes, ok := triggerMetadata[AuthModesKey]
 	// no authMode specified
 	if !ok {
 		return nil, nil
@@ -39,7 +39,7 @@ func GetAuthConfigs(triggerMetadata, authParams map[string]string) (out *AuthMet
 				return nil, errors.New("no bearer token provided")
 			}
 			if out.EnableBasicAuth {
-				return nil, errors.New("beare and basic authentication can not be set both")
+				return nil, errors.New("both bearer and basic authentication can not be set")
 			}
 
 			out.BearerToken = authParams["bearerToken"]
@@ -49,7 +49,7 @@ func GetAuthConfigs(triggerMetadata, authParams map[string]string) (out *AuthMet
 				return nil, errors.New("no username given")
 			}
 			if out.EnableBearerAuth {
-				return nil, errors.New("beare and basic authentication can not be set both")
+				return nil, errors.New("both bearer and basic authentication can not be set")
 			}
 
 			out.Username = authParams["username"]
@@ -69,8 +69,19 @@ func GetAuthConfigs(triggerMetadata, authParams map[string]string) (out *AuthMet
 
 			out.Key = authParams["key"]
 			out.EnableTLS = true
+		case CustomAuthType:
+			if len(authParams["customAuthHeader"]) == 0 {
+				return nil, errors.New("no custom auth header given")
+			}
+			out.CustomAuthHeader = authParams["customAuthHeader"]
+
+			if len(authParams["customAuthValue"]) == 0 {
+				return nil, errors.New("no custom auth value given")
+			}
+			out.CustomAuthValue = authParams["customAuthValue"]
+			out.EnableCustomAuth = true
 		default:
-			return nil, fmt.Errorf("err incorrect value for authMode is given: %s", t)
+			return nil, fmt.Errorf("incorrect value for authMode is given: %s", t)
 		}
 	}
 
@@ -81,16 +92,26 @@ func GetAuthConfigs(triggerMetadata, authParams map[string]string) (out *AuthMet
 	return out, err
 }
 
+func GetBearerToken(auth *AuthMeta) string {
+	return fmt.Sprintf("Bearer %s", auth.BearerToken)
+}
+
+func NewTLSConfig(auth *AuthMeta, unsafeSsl bool) (*tls.Config, error) {
+	return kedautil.NewTLSConfig(
+		auth.Cert,
+		auth.Key,
+		auth.CA,
+		unsafeSsl,
+	)
+}
+
 func CreateHTTPRoundTripper(roundTripperType TransportType, auth *AuthMeta, conf ...*HTTPTransport) (rt http.RoundTripper, err error) {
-	tlsConfig := &tls.Config{InsecureSkipVerify: false}
+	unsafeSsl := false
+	tlsConfig := kedautil.CreateTLSClientConfig(unsafeSsl)
 	if auth != nil && (auth.CA != "" || auth.EnableTLS) {
-		tlsConfig, err = kedautil.NewTLSConfig(
-			auth.Cert,
-			auth.Key,
-			auth.CA,
-		)
+		tlsConfig, err = NewTLSConfig(auth, unsafeSsl)
 		if err != nil || tlsConfig == nil {
-			return nil, fmt.Errorf("error creating the TLS config: %s", err)
+			return nil, fmt.Errorf("error creating the TLS config: %w", err)
 		}
 	}
 
@@ -127,7 +148,7 @@ func CreateHTTPRoundTripper(roundTripperType TransportType, auth *AuthMeta, conf
 			libs.SetTransportConfigs(httpConf),
 			libs.SetTLS(tlsConfig),
 		); err != nil {
-			return nil, fmt.Errorf("error creating fast http round tripper: %s", err)
+			return nil, fmt.Errorf("error creating fast http round tripper: %w", err)
 		}
 
 		if auth != nil {
