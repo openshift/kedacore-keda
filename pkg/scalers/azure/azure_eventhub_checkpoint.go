@@ -82,6 +82,11 @@ type goSdkCheckpointer struct {
 	containerName string
 }
 
+type daprCheckpointer struct {
+	partitionID   string
+	containerName string
+}
+
 type defaultCheckpointer struct {
 	partitionID   string
 	containerName string
@@ -97,6 +102,11 @@ func newCheckpointer(info EventHubInfo, partitionID string) checkpointer {
 	switch {
 	case (info.CheckpointStrategy == "goSdk"):
 		return &goSdkCheckpointer{
+			containerName: info.BlobContainer,
+			partitionID:   partitionID,
+		}
+	case (info.CheckpointStrategy == "dapr"):
+		return &daprCheckpointer{
 			containerName: info.BlobContainer,
 			partitionID:   partitionID,
 		}
@@ -174,8 +184,32 @@ func (checkpointer *goSdkCheckpointer) resolvePath(info EventHubInfo) (*url.URL,
 	return path, nil
 }
 
+// resolve path for daprCheckpointer
+func (checkpointer *daprCheckpointer) resolvePath(info EventHubInfo) (*url.URL, error) {
+	_, eventHubName, err := getHubAndNamespace(info)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := url.Parse(fmt.Sprintf("/%s/dapr-%s-%s-%s", info.BlobContainer, eventHubName, info.EventHubConsumerGroup, checkpointer.partitionID))
+	if err != nil {
+		return nil, err
+	}
+
+	return path, nil
+}
+
+// extract checkpoint for DaprCheckpointer
+func (checkpointer *daprCheckpointer) extractCheckpoint(get *azblob.DownloadResponse) (Checkpoint, error) {
+	return newGoSdkCheckpoint(get)
+}
+
 // extract checkpoint for goSdkCheckpointer
 func (checkpointer *goSdkCheckpointer) extractCheckpoint(get *azblob.DownloadResponse) (Checkpoint, error) {
+	return newGoSdkCheckpoint(get)
+}
+
+func newGoSdkCheckpoint(get *azblob.DownloadResponse) (Checkpoint, error) {
 	var checkpoint goCheckpoint
 	err := readToCheckpointFromBody(get, &checkpoint)
 	if err != nil {
@@ -206,16 +240,16 @@ func (checkpointer *defaultCheckpointer) extractCheckpoint(get *azblob.DownloadR
 
 	reader := get.Body(azblob.RetryReaderOptions{})
 	if _, err := blobData.ReadFrom(reader); err != nil {
-		return Checkpoint{}, fmt.Errorf("failed to read blob data: %s", err)
+		return Checkpoint{}, fmt.Errorf("failed to read blob data: %w", err)
 	}
 	defer reader.Close() // The client must close the response body when finished with it
 
 	if err := json.Unmarshal(blobData.Bytes(), &checkpoint); err != nil {
-		return Checkpoint{}, fmt.Errorf("failed to decode blob data: %s", err)
+		return Checkpoint{}, fmt.Errorf("failed to decode blob data: %w", err)
 	}
 
 	if err := json.Unmarshal(blobData.Bytes(), &pyCheckpoint); err != nil {
-		return Checkpoint{}, fmt.Errorf("failed to decode blob data: %s", err)
+		return Checkpoint{}, fmt.Errorf("failed to decode blob data: %w", err)
 	}
 
 	err := mergo.Merge(&checkpoint, Checkpoint(pyCheckpoint))
@@ -224,8 +258,22 @@ func (checkpointer *defaultCheckpointer) extractCheckpoint(get *azblob.DownloadR
 }
 
 func getCheckpoint(ctx context.Context, httpClient util.HTTPDoer, info EventHubInfo, checkpointer checkpointer) (Checkpoint, error) {
+	var podIdentity = info.PodIdentity
+
+	// For back-compat, prefer a connection string over pod identity when present
+	if len(info.StorageConnection) != 0 {
+		podIdentity.Provider = kedav1alpha1.PodIdentityProviderNone
+	}
+
+	if podIdentity.Provider == kedav1alpha1.PodIdentityProviderAzure || podIdentity.Provider == kedav1alpha1.PodIdentityProviderAzureWorkload {
+		if len(info.StorageAccountName) == 0 {
+			return Checkpoint{}, fmt.Errorf("storageAccountName not supplied when PodIdentity authentication is enabled")
+		}
+	}
+
 	blobCreds, storageEndpoint, err := ParseAzureStorageBlobConnection(ctx, httpClient,
-		kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone}, info.StorageConnection, "", "")
+		podIdentity, info.StorageConnection, info.StorageAccountName, info.BlobStorageEndpoint)
+
 	if err != nil {
 		return Checkpoint{}, err
 	}
@@ -283,12 +331,12 @@ func readToCheckpointFromBody(get *azblob.DownloadResponse, checkpoint interface
 
 	reader := get.Body(azblob.RetryReaderOptions{})
 	if _, err := blobData.ReadFrom(reader); err != nil {
-		return fmt.Errorf("failed to read blob data: %s", err)
+		return fmt.Errorf("failed to read blob data: %w", err)
 	}
 	defer reader.Close() // The client must close the response body when finished with it
 
 	if err := json.Unmarshal(blobData.Bytes(), &checkpoint); err != nil {
-		return fmt.Errorf("failed to decode blob data: %s", err)
+		return fmt.Errorf("failed to decode blob data: %w", err)
 	}
 
 	return nil

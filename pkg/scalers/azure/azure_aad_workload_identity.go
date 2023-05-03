@@ -25,6 +25,7 @@ import (
 	"time"
 
 	amqpAuth "github.com/Azure/azure-amqp-common-go/v3/auth"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/confidential"
@@ -43,18 +44,26 @@ const (
 	azureAuthrityHostEnv       = "AZURE_AUTHORITY_HOST"
 )
 
+var DefaultClientID string
+var TenantID string
+var TokenFilePath string
+var AuthorityHost string
+
+func init() {
+	DefaultClientID = os.Getenv(azureClientIDEnv)
+	TenantID = os.Getenv(azureTenantIDEnv)
+	TokenFilePath = os.Getenv(azureFederatedTokenFileEnv)
+	AuthorityHost = os.Getenv(azureAuthrityHostEnv)
+}
+
 // GetAzureADWorkloadIdentityToken returns the AADToken for resource
 func GetAzureADWorkloadIdentityToken(ctx context.Context, identityID, resource string) (AADToken, error) {
-	clientID := os.Getenv(azureClientIDEnv)
-	tenantID := os.Getenv(azureTenantIDEnv)
-	tokenFilePath := os.Getenv(azureFederatedTokenFileEnv)
-	authorityHost := os.Getenv(azureAuthrityHostEnv)
-
+	clientID := DefaultClientID
 	if identityID != "" {
 		clientID = identityID
 	}
 
-	signedAssertion, err := readJWTFromFileSystem(tokenFilePath)
+	signedAssertion, err := readJWTFromFileSystem(TokenFilePath)
 	if err != nil {
 		return AADToken{}, fmt.Errorf("error reading service account token - %w", err)
 	}
@@ -67,7 +76,7 @@ func GetAzureADWorkloadIdentityToken(ctx context.Context, identityID, resource s
 		return signedAssertion, nil
 	})
 
-	authorityOption := confidential.WithAuthority(fmt.Sprintf("%s%s/oauth2/token", authorityHost, tenantID))
+	authorityOption := confidential.WithAuthority(fmt.Sprintf("%s%s/oauth2/token", AuthorityHost, TenantID))
 	confidentialClient, err := confidential.New(
 		clientID,
 		cred,
@@ -122,6 +131,14 @@ func NewAzureADWorkloadIdentityConfig(ctx context.Context, identityID, resource 
 func (aadWiConfig ADWorkloadIdentityConfig) Authorizer() (autorest.Authorizer, error) {
 	return autorest.NewBearerAuthorizer(NewAzureADWorkloadIdentityTokenProvider(
 		aadWiConfig.ctx, aadWiConfig.IdentityID, aadWiConfig.Resource)), nil
+}
+
+func NewADWorkloadIdentityCredential(identityID string) (*azidentity.WorkloadIdentityCredential, error) {
+	clientID := DefaultClientID
+	if identityID != "" {
+		clientID = identityID
+	}
+	return azidentity.NewWorkloadIdentityCredential(TenantID, clientID, TokenFilePath, &azidentity.WorkloadIdentityCredentialOptions{})
 }
 
 // ADWorkloadIdentityTokenProvider is a type that implements the adal.OAuthTokenProvider and adal.Refresher interfaces.

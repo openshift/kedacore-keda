@@ -9,13 +9,13 @@ import (
 	v2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 )
 
 type cpuMemoryScaler struct {
 	metadata     *cpuMemoryMetadata
 	resourceName v1.ResourceName
+	logger       logr.Logger
 }
 
 type cpuMemoryMetadata struct {
@@ -31,12 +31,13 @@ func NewCPUMemoryScaler(resourceName v1.ResourceName, config *ScalerConfig) (Sca
 
 	meta, parseErr := parseResourceMetadata(config, logger)
 	if parseErr != nil {
-		return nil, fmt.Errorf("error parsing %s metadata: %s", resourceName, parseErr)
+		return nil, fmt.Errorf("error parsing %s metadata: %w", resourceName, parseErr)
 	}
 
 	return &cpuMemoryScaler{
 		metadata:     meta,
 		resourceName: resourceName,
+		logger:       logger,
 	}, nil
 }
 
@@ -82,11 +83,6 @@ func parseResourceMetadata(config *ScalerConfig, logger logr.Logger) (*cpuMemory
 	return meta, nil
 }
 
-// IsActive always return true for cpu/memory scaler
-func (s *cpuMemoryScaler) IsActive(ctx context.Context) (bool, error) {
-	return true, nil
-}
-
 // Close no need for cpuMemory scaler
 func (s *cpuMemoryScaler) Close(context.Context) error {
 	return nil
@@ -122,7 +118,7 @@ func (s *cpuMemoryScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSp
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics no need for cpu/memory scaler
-func (s *cpuMemoryScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
-	return nil, nil
+// GetMetrics no need for cpu/memory scaler and always active for cpu/memory scaler
+func (s *cpuMemoryScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+	return nil, true, nil
 }

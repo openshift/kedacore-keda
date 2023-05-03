@@ -9,6 +9,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+
+	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 )
 
 type parsePrometheusMetadataTestData struct {
@@ -34,8 +36,6 @@ var testPromMetadata = []parsePrometheusMetadataTestData{
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "activationThreshold": "50"}, false},
 	// missing serverAddress
 	{map[string]string{"serverAddress": "", "metricName": "http_requests_total", "threshold": "100", "query": "up"}, true},
-	// missing metricName
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "", "threshold": "100", "query": "up"}, true},
 	// missing threshold
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "query": "up"}, true},
 	// malformed threshold
@@ -46,6 +46,14 @@ var testPromMetadata = []parsePrometheusMetadataTestData{
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": ""}, true},
 	// ignoreNullValues with wrong value
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "ignoreNullValues": "xxxx"}, true},
+	// unsafeSsl
+	{map[string]string{"serverAddress": "https://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "unsafeSsl": "true"}, false},
+	// customHeaders
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "customHeaders": "key1=value1,key2=value2"}, false},
+	// customHeaders with wrong format
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "customHeaders": "key1=value1,key2"}, true},
+	// deprecated cortexOrgID
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "cortexOrgID": "my-org"}, true},
 }
 
 var prometheusMetricIdentifiers = []prometheusMetricIdentifier{
@@ -54,32 +62,47 @@ var prometheusMetricIdentifiers = []prometheusMetricIdentifier{
 }
 
 type prometheusAuthMetadataTestData struct {
-	metadata   map[string]string
-	authParams map[string]string
-	isError    bool
+	metadata            map[string]string
+	authParams          map[string]string
+	podIdentityProvider kedav1alpha1.PodIdentityProvider
+	isError             bool
 }
 
 var testPrometheusAuthMetadata = []prometheusAuthMetadataTestData{
 	// success TLS
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert", "key": "keey"}, false},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert", "key": "keey"}, "", false},
 	// TLS, ca is optional
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"cert": "ceert", "key": "keey"}, false},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"cert": "ceert", "key": "keey"}, "", false},
 	// fail TLS, key not given
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert"}, true},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert"}, "", true},
 	// fail TLS, cert not given
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "key": "keey"}, true},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls"}, map[string]string{"ca": "caaa", "key": "keey"}, "", true},
 	// success bearer default
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "bearer"}, map[string]string{"bearerToken": "tooooken"}, false},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "bearer"}, map[string]string{"bearerToken": "tooooken"}, "", false},
 	// fail bearerAuth with no token
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "bearer"}, map[string]string{}, true},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "bearer"}, map[string]string{}, "", true},
 	// success basicAuth
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "basic"}, map[string]string{"username": "user", "password": "pass"}, false},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "basic"}, map[string]string{"username": "user", "password": "pass"}, "", false},
 	// fail basicAuth with no username
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "basic"}, map[string]string{}, true},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "basic"}, map[string]string{}, "", true},
 
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls, basic"}, map[string]string{"ca": "caaa", "cert": "ceert", "key": "keey", "username": "user", "password": "pass"}, false},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls, basic"}, map[string]string{"ca": "caaa", "cert": "ceert", "key": "keey", "username": "user", "password": "pass"}, "", false},
 
-	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls,basic"}, map[string]string{"username": "user", "password": "pass"}, true},
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls,basic"}, map[string]string{"username": "user", "password": "pass"}, "", true},
+	// success custom auth
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "custom"}, map[string]string{"customAuthHeader": "header", "customAuthValue": "value"}, "", false},
+	// fail custom auth with no customAuthHeader
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "custom"}, map[string]string{"customAuthHeader": ""}, "", true},
+	// fail custom auth with no customAuthValue
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "custom"}, map[string]string{"customAuthValue": ""}, "", true},
+
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "tls,basic"}, map[string]string{"username": "user", "password": "pass"}, "", true},
+	// pod identity and other auth modes enabled together
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "authModes": "basic"}, map[string]string{"username": "user", "password": "pass"}, "azure-workload", true},
+	// azure workload identity
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up"}, nil, "azure-workload", false},
+	// azure pod identity
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up"}, nil, "azure", false},
 }
 
 func TestPrometheusParseMetadata(t *testing.T) {
@@ -115,7 +138,7 @@ func TestPrometheusGetMetricSpecForScaling(t *testing.T) {
 
 func TestPrometheusScalerAuthParams(t *testing.T) {
 	for _, testData := range testPrometheusAuthMetadata {
-		meta, err := parsePrometheusMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
+		meta, err := parsePrometheusMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams, PodIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.podIdentityProvider}})
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -125,10 +148,13 @@ func TestPrometheusScalerAuthParams(t *testing.T) {
 		}
 
 		if err == nil {
-			if (meta.prometheusAuth.EnableBearerAuth && !strings.Contains(testData.metadata["authModes"], "bearer")) ||
-				(meta.prometheusAuth.EnableBasicAuth && !strings.Contains(testData.metadata["authModes"], "basic")) ||
-				(meta.prometheusAuth.EnableTLS && !strings.Contains(testData.metadata["authModes"], "tls")) {
-				t.Error("wrong auth mode detected")
+			if meta.prometheusAuth != nil {
+				if (meta.prometheusAuth.EnableBearerAuth && !strings.Contains(testData.metadata["authModes"], "bearer")) ||
+					(meta.prometheusAuth.EnableBasicAuth && !strings.Contains(testData.metadata["authModes"], "basic")) ||
+					(meta.prometheusAuth.EnableTLS && !strings.Contains(testData.metadata["authModes"], "tls")) ||
+					(meta.prometheusAuth.EnableCustomAuth && !strings.Contains(testData.metadata["authModes"], "custom")) {
+					t.Error("wrong auth mode detected")
+				}
 			}
 		}
 	}
@@ -141,6 +167,7 @@ type prometheusQromQueryResultTestData struct {
 	expectedValue    float64
 	isError          bool
 	ignoreNullValues bool
+	unsafeSsl        bool
 }
 
 var testPromQueryResult = []prometheusQromQueryResultTestData{
@@ -151,6 +178,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    0,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        false,
 	},
 	{
 		name:             "no values",
@@ -159,6 +187,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    0,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "no values but shouldn't ignore",
@@ -167,6 +196,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: false,
+		unsafeSsl:        false,
 	},
 	{
 		name:             "value is empty list",
@@ -175,6 +205,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    0,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "value is empty list but shouldn't ignore",
@@ -183,6 +214,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: false,
+		unsafeSsl:        false,
 	},
 	{
 		name:             "valid value",
@@ -191,6 +223,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    2,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "not enough values",
@@ -199,6 +232,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "multiple results",
@@ -207,6 +241,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "error status response",
@@ -215,6 +250,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "+Inf",
@@ -223,6 +259,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    0,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "+Inf but shouldn't ignore ",
@@ -231,6 +268,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: false,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "-Inf",
@@ -239,6 +277,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    0,
 		isError:          false,
 		ignoreNullValues: true,
+		unsafeSsl:        true,
 	},
 	{
 		name:             "-Inf but shouldn't ignore ",
@@ -247,6 +286,7 @@ var testPromQueryResult = []prometheusQromQueryResultTestData{
 		expectedValue:    -1,
 		isError:          true,
 		ignoreNullValues: false,
+		unsafeSsl:        true,
 	},
 }
 
@@ -265,6 +305,7 @@ func TestPrometheusScalerExecutePromQuery(t *testing.T) {
 				metadata: &prometheusMetadata{
 					serverAddress:    server.URL,
 					ignoreNullValues: testData.ignoreNullValues,
+					unsafeSsl:        testData.unsafeSsl,
 				},
 				httpClient: http.DefaultClient,
 				logger:     logr.Discard(),
@@ -283,7 +324,7 @@ func TestPrometheusScalerExecutePromQuery(t *testing.T) {
 	}
 }
 
-func TestPrometheusScalerCortexHeader(t *testing.T) {
+func TestPrometheusScalerCustomHeaders(t *testing.T) {
 	testData := prometheusQromQueryResultTestData{
 		name:             "no values",
 		bodyStr:          `{"data":{"result":[]}}`,
@@ -292,10 +333,17 @@ func TestPrometheusScalerCortexHeader(t *testing.T) {
 		isError:          false,
 		ignoreNullValues: true,
 	}
-	cortexOrgValue := "my-org"
+	customHeadersValue := map[string]string{
+		"X-Client-Id":          "cid",
+		"X-Tenant-Id":          "tid",
+		"X-Organization-Token": "oid",
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		reqHeader := request.Header.Get(promCortexHeaderKey)
-		assert.Equal(t, reqHeader, cortexOrgValue)
+		for headerName, headerValue := range customHeadersValue {
+			reqHeader := request.Header.Get(headerName)
+			assert.Equal(t, reqHeader, headerValue)
+		}
+
 		writer.WriteHeader(testData.responseStatus)
 		if _, err := writer.Write([]byte(testData.bodyStr)); err != nil {
 			t.Fatal(err)
@@ -305,7 +353,7 @@ func TestPrometheusScalerCortexHeader(t *testing.T) {
 	scaler := prometheusScaler{
 		metadata: &prometheusMetadata{
 			serverAddress:    server.URL,
-			cortexOrgID:      cortexOrgValue,
+			customHeaders:    customHeadersValue,
 			ignoreNullValues: testData.ignoreNullValues,
 		},
 		httpClient: http.DefaultClient,

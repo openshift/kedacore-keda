@@ -4,13 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/go-sql-driver/mysql"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -40,19 +40,19 @@ type mySQLMetadata struct {
 func NewMySQLScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "mysql_scaler")
 
 	meta, err := parseMySQLMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing MySQL metadata: %s", err)
+		return nil, fmt.Errorf("error parsing MySQL metadata: %w", err)
 	}
 
 	conn, err := newMySQLConnection(meta, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error establishing MySQL connection: %s", err)
+		return nil, fmt.Errorf("error establishing MySQL connection: %w", err)
 	}
 	return &mySQLScaler{
 		metricType: metricType,
@@ -74,7 +74,7 @@ func parseMySQLMetadata(config *ScalerConfig) (*mySQLMetadata, error) {
 	if val, ok := config.TriggerMetadata["queryValue"]; ok {
 		queryValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("queryValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("queryValue parsing error %w", err)
 		}
 		meta.queryValue = queryValue
 	} else {
@@ -85,7 +85,7 @@ func parseMySQLMetadata(config *ScalerConfig) (*mySQLMetadata, error) {
 	if val, ok := config.TriggerMetadata["activationQueryValue"]; ok {
 		activationQueryValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationQueryValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationQueryValue parsing error %w", err)
 		}
 		meta.activationQueryValue = activationQueryValue
 	}
@@ -98,25 +98,29 @@ func parseMySQLMetadata(config *ScalerConfig) (*mySQLMetadata, error) {
 	default:
 		meta.connectionString = ""
 		var err error
-		meta.host, err = GetFromAuthOrMeta(config, "host")
+		host, err := GetFromAuthOrMeta(config, "host")
 		if err != nil {
 			return nil, err
 		}
+		meta.host = host
 
-		meta.port, err = GetFromAuthOrMeta(config, "port")
+		port, err := GetFromAuthOrMeta(config, "port")
 		if err != nil {
 			return nil, err
 		}
+		meta.port = port
 
-		meta.username, err = GetFromAuthOrMeta(config, "username")
+		username, err := GetFromAuthOrMeta(config, "username")
 		if err != nil {
 			return nil, err
 		}
+		meta.username = username
 
-		meta.dbName, err = GetFromAuthOrMeta(config, "dbName")
+		dbName, err := GetFromAuthOrMeta(config, "dbName")
 		if err != nil {
 			return nil, err
 		}
+		meta.dbName = dbName
 
 		if config.AuthParams["password"] != "" {
 			meta.password = config.AuthParams["password"]
@@ -146,7 +150,7 @@ func metadataToConnectionStr(meta *mySQLMetadata) string {
 	} else {
 		// Build connection str
 		config := mysql.NewConfig()
-		config.Addr = fmt.Sprintf("%s:%s", meta.host, meta.port)
+		config.Addr = net.JoinHostPort(meta.host, meta.port)
 		config.DBName = meta.dbName
 		config.Passwd = meta.password
 		config.User = meta.username
@@ -193,16 +197,6 @@ func (s *mySQLScaler) Close(context.Context) error {
 	return nil
 }
 
-// IsActive returns true if there are pending messages to be processed
-func (s *mySQLScaler) IsActive(ctx context.Context) (bool, error) {
-	messages, err := s.getQueryResult(ctx)
-	if err != nil {
-		s.logger.Error(err, fmt.Sprintf("Error inspecting MySQL: %s", err))
-		return false, err
-	}
-	return messages > s.metadata.activationQueryValue, nil
-}
-
 // getQueryResult returns result of the scaler query
 func (s *mySQLScaler) getQueryResult(ctx context.Context) (float64, error) {
 	var value float64
@@ -228,14 +222,14 @@ func (s *mySQLScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *mySQLScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *mySQLScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	num, err := s.getQueryResult(ctx)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, fmt.Errorf("error inspecting MySQL: %s", err)
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error inspecting MySQL: %w", err)
 	}
 
 	metric := GenerateMetricInMili(metricName, num)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, num > s.metadata.activationQueryValue, nil
 }

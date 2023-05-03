@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -25,6 +24,11 @@ const (
 	azureAppInsightsMetricAggregationTypeName     = "metricAggregationType"
 	azureAppInsightsMetricFilterName              = "metricFilter"
 	azureAppInsightsTenantIDName                  = "tenantId"
+	azureAppInsightsIgnoreNullValues              = "ignoreNullValues"
+)
+
+var (
+	azureAppInsightsDefaultIgnoreNullValues = false
 )
 
 type azureAppInsightsMetadata struct {
@@ -32,6 +36,11 @@ type azureAppInsightsMetadata struct {
 	targetValue           float64
 	activationTargetValue float64
 	scalerIndex           int
+	// sometimes we should consider there is an error we can accept
+	// default value is true/t, to ignore the null value returned from prometheus
+	// change to false/f if you can not accept prometheus returning null values
+	// https://github.com/kedacore/keda/issues/4316
+	ignoreNullValues bool
 }
 
 type azureAppInsightsScaler struct {
@@ -45,14 +54,14 @@ type azureAppInsightsScaler struct {
 func NewAzureAppInsightsScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "azure_app_insights_scaler")
 
 	meta, err := parseAzureAppInsightsMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing azure app insights metadata: %s", err)
+		return nil, fmt.Errorf("error parsing azure app insights metadata: %w", err)
 	}
 
 	return &azureAppInsightsScaler{
@@ -72,20 +81,22 @@ func parseAzureAppInsightsMetadata(config *ScalerConfig, logger logr.Logger) (*a
 	if err != nil {
 		return nil, err
 	}
-	meta.targetValue, err = strconv.ParseFloat(val, 64)
+	targetValue, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		logger.Error(err, "Error parsing azure app insights metadata", azureAppInsightsTargetValueName, azureAppInsightsTargetValueName)
-		return nil, fmt.Errorf("error parsing azure app insights metadata %s: %s", azureAppInsightsTargetValueName, err.Error())
+		return nil, fmt.Errorf("error parsing azure app insights metadata %s: %w", azureAppInsightsTargetValueName, err)
 	}
+	meta.targetValue = targetValue
 
 	meta.activationTargetValue = 0
 	val, err = getParameterFromConfig(config, azureAppInsightsActivationTargetValueName, false)
 	if err == nil {
-		meta.activationTargetValue, err = strconv.ParseFloat(val, 64)
+		activationTargetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing azure app insights metadata", azureAppInsightsActivationTargetValueName, azureAppInsightsActivationTargetValueName)
-			return nil, fmt.Errorf("error parsing azure app insights metadata %s: %s", azureAppInsightsActivationTargetValueName, err.Error())
+			return nil, fmt.Errorf("error parsing azure app insights metadata %s: %w", azureAppInsightsActivationTargetValueName, err)
 		}
+		meta.activationTargetValue = activationTargetValue
 	}
 
 	val, err = getParameterFromConfig(config, azureAppInsightsMetricID, false)
@@ -138,6 +149,16 @@ func parseAzureAppInsightsMetadata(config *ScalerConfig, logger logr.Logger) (*a
 	}
 	meta.azureAppInsightsInfo.ActiveDirectoryEndpoint = activeDirectoryEndpoint
 
+	meta.ignoreNullValues = azureAppInsightsDefaultIgnoreNullValues
+	if val, ok := config.TriggerMetadata[azureAppInsightsIgnoreNullValues]; ok && val != "" {
+		azureAppInsightsIgnoreNullValues, err := strconv.ParseBool(val)
+		if err != nil {
+			return nil, fmt.Errorf("err incorrect value for azureAppInsightsIgnoreNullValues given: %s, "+
+				"please use true or false", val)
+		}
+		meta.ignoreNullValues = azureAppInsightsIgnoreNullValues
+	}
+
 	// Required authentication parameters below
 
 	val, err = getParameterFromConfig(config, azureAppInsightsAppIDName, true)
@@ -164,17 +185,6 @@ func parseAzureAppInsightsMetadata(config *ScalerConfig, logger logr.Logger) (*a
 	return &meta, nil
 }
 
-// Returns true if the Azure App Insights metric value is greater than the target value
-func (s *azureAppInsightsScaler) IsActive(ctx context.Context) (bool, error) {
-	val, err := azure.GetAzureAppInsightsMetricValue(ctx, s.metadata.azureAppInsightsInfo, s.podIdentity)
-	if err != nil {
-		s.logger.Error(err, "error getting azure app insights metric")
-		return false, err
-	}
-
-	return val > s.metadata.activationTargetValue, nil
-}
-
 func (s *azureAppInsightsScaler) Close(context.Context) error {
 	return nil
 }
@@ -190,15 +200,15 @@ func (s *azureAppInsightsScaler) GetMetricSpecForScaling(context.Context) []v2.M
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *azureAppInsightsScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
-	val, err := azure.GetAzureAppInsightsMetricValue(ctx, s.metadata.azureAppInsightsInfo, s.podIdentity)
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *azureAppInsightsScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+	val, err := azure.GetAzureAppInsightsMetricValue(ctx, s.metadata.azureAppInsightsInfo, s.podIdentity, s.metadata.ignoreNullValues)
 	if err != nil {
 		s.logger.Error(err, "error getting azure app insights metric")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, val)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, val > s.metadata.activationTargetValue, nil
 }

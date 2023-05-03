@@ -14,7 +14,6 @@ import (
 	"github.com/tidwall/gjson"
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	"github.com/kedacore/keda/v2/pkg/scalers/authentication"
@@ -33,6 +32,7 @@ type metricsAPIScalerMetadata struct {
 	activationTargetValue float64
 	url                   string
 	valueLocation         string
+	unsafeSsl             bool
 
 	// apiKeyAuth
 	enableAPIKeyAuth bool
@@ -68,23 +68,22 @@ const (
 func NewMetricsAPIScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	meta, err := parseMetricsAPIMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing metric API metadata: %s", err)
+		return nil, fmt.Errorf("error parsing metric API metadata: %w", err)
 	}
 
-	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false)
+	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, meta.unsafeSsl)
 
 	if meta.enableTLS || len(meta.ca) > 0 {
-		config, err := kedautil.NewTLSConfig(meta.cert, meta.key, meta.ca)
+		config, err := kedautil.NewTLSConfig(meta.cert, meta.key, meta.ca, meta.unsafeSsl)
 		if err != nil {
 			return nil, err
 		}
-
-		httpClient.Transport = &http.Transport{TLSClientConfig: config}
+		httpClient.Transport = kedautil.CreateHTTPTransportWithTLSConfig(config)
 	}
 
 	return &metricsAPIScaler{
@@ -99,10 +98,19 @@ func parseMetricsAPIMetadata(config *ScalerConfig) (*metricsAPIScalerMetadata, e
 	meta := metricsAPIScalerMetadata{}
 	meta.scalerIndex = config.ScalerIndex
 
+	meta.unsafeSsl = false
+	if val, ok := config.TriggerMetadata["unsafeSsl"]; ok {
+		unsafeSsl, err := strconv.ParseBool(val)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing unsafeSsl: %w", err)
+		}
+		meta.unsafeSsl = unsafeSsl
+	}
+
 	if val, ok := config.TriggerMetadata["targetValue"]; ok {
 		targetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("targetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("targetValue parsing error %w", err)
 		}
 		meta.targetValue = targetValue
 	} else {
@@ -113,7 +121,7 @@ func parseMetricsAPIMetadata(config *ScalerConfig) (*metricsAPIScalerMetadata, e
 	if val, ok := config.TriggerMetadata["activationTargetValue"]; ok {
 		activationTargetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("targetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("targetValue parsing error %w", err)
 		}
 		meta.activationTargetValue = activationTargetValue
 	}
@@ -248,17 +256,6 @@ func (s *metricsAPIScaler) Close(context.Context) error {
 	return nil
 }
 
-// IsActive returns true if there are pending messages to be processed
-func (s *metricsAPIScaler) IsActive(ctx context.Context) (bool, error) {
-	v, err := s.getMetricValue(ctx)
-	if err != nil {
-		s.logger.Error(err, fmt.Sprintf("Error when checking metric value: %s", err))
-		return false, err
-	}
-
-	return v > s.metadata.activationTargetValue, nil
-}
-
 // GetMetricSpecForScaling returns the MetricSpec for the Horizontal Pod Autoscaler
 func (s *metricsAPIScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	externalMetric := &v2.ExternalMetricSource{
@@ -273,16 +270,16 @@ func (s *metricsAPIScaler) GetMetricSpecForScaling(context.Context) []v2.MetricS
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *metricsAPIScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *metricsAPIScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	val, err := s.getMetricValue(ctx)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, fmt.Errorf("error requesting metrics endpoint: %s", err)
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error requesting metrics endpoint: %w", err)
 	}
 
 	metric := GenerateMetricInMili(metricName, val)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, val > s.metadata.activationTargetValue, nil
 }
 
 func getMetricAPIServerRequest(ctx context.Context, meta *metricsAPIScalerMetadata) (*http.Request, error) {

@@ -2,7 +2,6 @@ package scalers
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"strconv"
 
@@ -10,10 +9,9 @@ import (
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	api "github.com/influxdata/influxdb-client-go/v2/api"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
-	kedautil "github.com/kedacore/keda/v2/pkg/util"
+	"github.com/kedacore/keda/v2/pkg/util"
 )
 
 type influxDBScaler struct {
@@ -39,21 +37,21 @@ type influxDBMetadata struct {
 func NewInfluxDBScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "influxdb_scaler")
 
 	meta, err := parseInfluxDBMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing influxdb metadata: %s", err)
+		return nil, fmt.Errorf("error parsing influxdb metadata: %w", err)
 	}
 
 	logger.Info("starting up influxdb client")
 	client := influxdb2.NewClientWithOptions(
 		meta.serverURL,
 		meta.authToken,
-		influxdb2.DefaultOptions().SetTLSConfig(&tls.Config{InsecureSkipVerify: meta.unsafeSsl}))
+		influxdb2.DefaultOptions().SetTLSConfig(util.CreateTLSClientConfig(meta.unsafeSsl)))
 
 	return &influxDBScaler{
 		client:     client,
@@ -120,16 +118,17 @@ func parseInfluxDBMetadata(config *ScalerConfig) (*influxDBMetadata, error) {
 		return nil, fmt.Errorf("no server url given")
 	}
 
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata["metricName"]; ok {
-		metricName = kedautil.NormalizeString(fmt.Sprintf("influxdb-%s", val))
+		metricName = util.NormalizeString(fmt.Sprintf("influxdb-%s", val))
 	} else {
-		metricName = kedautil.NormalizeString(fmt.Sprintf("influxdb-%s", organizationName))
+		metricName = util.NormalizeString(fmt.Sprintf("influxdb-%s", organizationName))
 	}
 
 	if val, ok := config.TriggerMetadata["activationThresholdValue"]; ok {
 		value, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationThresholdValue: failed to parse activationThresholdValue %s", err.Error())
+			return nil, fmt.Errorf("activationThresholdValue: failed to parse activationThresholdValue %w", err)
 		}
 		activationThresholdValue = value
 	}
@@ -137,7 +136,7 @@ func parseInfluxDBMetadata(config *ScalerConfig) (*influxDBMetadata, error) {
 	if val, ok := config.TriggerMetadata["thresholdValue"]; ok {
 		value, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("thresholdValue: failed to parse thresholdValue length %s", err.Error())
+			return nil, fmt.Errorf("thresholdValue: failed to parse thresholdValue length %w", err)
 		}
 		thresholdValue = value
 	} else {
@@ -147,7 +146,7 @@ func parseInfluxDBMetadata(config *ScalerConfig) (*influxDBMetadata, error) {
 	if val, ok := config.TriggerMetadata["unsafeSsl"]; ok {
 		parsedVal, err := strconv.ParseBool(val)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing unsafeSsl: %s", err)
+			return nil, fmt.Errorf("error parsing unsafeSsl: %w", err)
 		}
 		unsafeSsl = parsedVal
 	}
@@ -163,18 +162,6 @@ func parseInfluxDBMetadata(config *ScalerConfig) (*influxDBMetadata, error) {
 		unsafeSsl:                unsafeSsl,
 		scalerIndex:              config.ScalerIndex,
 	}, nil
-}
-
-// IsActive returns true if queried value is above the minimum value
-func (s *influxDBScaler) IsActive(ctx context.Context) (bool, error) {
-	queryAPI := s.client.QueryAPI(s.metadata.organizationName)
-
-	value, err := queryInfluxDB(ctx, queryAPI, s.metadata.query)
-	if err != nil {
-		return false, err
-	}
-
-	return value > s.metadata.activationThresholdValue, nil
 }
 
 // Close closes the connection of the client to the server
@@ -207,19 +194,19 @@ func queryInfluxDB(ctx context.Context, queryAPI api.QueryAPI, query string) (fl
 	}
 }
 
-// GetMetrics connects to influxdb via the client and returns a value based on the query
-func (s *influxDBScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity connects to influxdb via the client and returns a value based on the query
+func (s *influxDBScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	// Grab QueryAPI to make queries to influxdb instance
 	queryAPI := s.client.QueryAPI(s.metadata.organizationName)
 
 	value, err := queryInfluxDB(ctx, queryAPI, s.metadata.query)
 	if err != nil {
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, value)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, value > s.metadata.activationThresholdValue, nil
 }
 
 // GetMetricSpecForScaling returns the metric spec for the Horizontal Pod Autoscaler

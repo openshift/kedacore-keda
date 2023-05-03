@@ -48,6 +48,10 @@ spec:
           env:
             - name: WATCH_NAMESPACE
               value: ""
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: KEDA_HTTP_DEFAULT_TIMEOUT
               value: ""
           args:
@@ -55,6 +59,10 @@ spec:
           - --secure-port=6443
           - --logtostderr=true
           - --v=0
+          - --client-ca-file=/certs/ca.crt
+          - --tls-cert-file=/certs/tls.crt
+          - --tls-private-key-file=/certs/tls.key
+          - --cert-dir=/certs
           ports:
           - containerPort: 6443
             name: https
@@ -65,15 +73,24 @@ spec:
           volumeMounts:
           - mountPath: /tmp
             name: temp-vol
+          - mountPath: /certs
+            name: certificates
+            readOnly: true
           securityContext:
+            runAsNonRoot: true
             capabilities:
               drop:
               - ALL
             allowPrivilegeEscalation: false
-            ## Metrics server needs to write the self-signed cert so it's not possible set this
-            # readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
       nodeSelector:
         kubernetes.io/os: linux
       volumes:
       - name: temp-vol
         emptyDir: {}
+      - name: certificates
+        secret:
+          defaultMode: 420
+          secretName: kedaorg-certs

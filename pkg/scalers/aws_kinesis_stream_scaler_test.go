@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/labels"
 )
 
 const (
@@ -21,6 +20,7 @@ const (
 	testAWSKinesisSessionToken    = "none"
 	testAWSKinesisStreamName      = "test"
 	testAWSRegion                 = "eu-west-1"
+	testAWSEndpoint               = "http://localhost:4566"
 	testAWSKinesisErrorStream     = "Error"
 )
 
@@ -88,6 +88,31 @@ var testAWSKinesisMetadata = []parseAWSKinesisMetadataTestData{
 		},
 		isError:     false,
 		comment:     "properly formed stream name and region",
+		scalerIndex: 0,
+	},
+	{
+		metadata: map[string]string{
+			"streamName":           testAWSKinesisStreamName,
+			"shardCount":           "2",
+			"activationShardCount": "1",
+			"awsRegion":            testAWSRegion,
+			"awsEndpoint":          testAWSEndpoint},
+		authParams: testAWSKinesisAuthentication,
+		expected: &awsKinesisStreamMetadata{
+			targetShardCount:           2,
+			activationTargetShardCount: 1,
+			streamName:                 testAWSKinesisStreamName,
+			awsRegion:                  testAWSRegion,
+			awsEndpoint:                testAWSEndpoint,
+			awsAuthorization: awsAuthorizationMetadata{
+				awsAccessKeyID:     testAWSKinesisAccessKeyID,
+				awsSecretAccessKey: testAWSKinesisSecretAccessKey,
+				podIdentityOwner:   true,
+			},
+			scalerIndex: 0,
+		},
+		isError:     false,
+		comment:     "properly formed stream name and region with custom endpoint",
 		scalerIndex: 0,
 	},
 	{
@@ -324,10 +349,9 @@ func TestAWSKinesisGetMetricSpecForScaling(t *testing.T) {
 }
 
 func TestAWSKinesisStreamScalerGetMetrics(t *testing.T) {
-	var selector labels.Selector
 	for _, meta := range awsKinesisGetMetricTestData {
 		scaler := awsKinesisStreamScaler{"", meta, &mockKinesis{}, logr.Discard()}
-		value, err := scaler.GetMetrics(context.Background(), "MetricName", selector)
+		value, _, err := scaler.GetMetricsAndActivity(context.Background(), "MetricName")
 		switch meta.streamName {
 		case testAWSKinesisErrorStream:
 			assert.Error(t, err, "expect error because of kinesis api error")

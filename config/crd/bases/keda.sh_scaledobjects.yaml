@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.9.0
+    controller-gen.kubebuilder.io/version: v0.11.1
   creationTimestamp: null
   name: scaledobjects.keda.sh
 spec:
@@ -119,10 +119,11 @@ spec:
                                   - value
                                   type: object
                                 type: array
+                                x-kubernetes-list-type: atomic
                               selectPolicy:
                                 description: selectPolicy is used to specify which
                                   policy should be used. If not set, the default value
-                                  MaxPolicySelect is used.
+                                  Max is used.
                                 type: string
                               stabilizationWindowSeconds:
                                 description: 'StabilizationWindowSeconds is the number
@@ -175,10 +176,11 @@ spec:
                                   - value
                                   type: object
                                 type: array
+                                x-kubernetes-list-type: atomic
                               selectPolicy:
                                 description: selectPolicy is used to specify which
                                   policy should be used. If not set, the default value
-                                  MaxPolicySelect is used.
+                                  Max is used.
                                 type: string
                               stabilizationWindowSeconds:
                                 description: 'StabilizationWindowSeconds is the number
@@ -274,6 +276,8 @@ spec:
                       type: string
                     type:
                       type: string
+                    useCachedMetrics:
+                      type: boolean
                   required:
                   - metadata
                   - type

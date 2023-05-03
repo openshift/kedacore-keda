@@ -72,7 +72,7 @@ spec:
     spec:
       containers:
       - name: redis-worker
-        image: abhirockzz/redis-streams-consumer
+        image: ghcr.io/kedacore/tests-redis-streams-consumer:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: REDIS_HOST
@@ -146,7 +146,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: abhirockzz/redis-streams-producer
+        image: ghcr.io/kedacore/tests-redis-streams-producer:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: REDIS_HOST
@@ -175,16 +175,16 @@ func TestScaler(t *testing.T) {
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 1, 60, 3),
 		"replica count should be %d after 3 minutes", 1)
 
-	testScaleUp(t, kc, data)
-	testScaleDown(t, kc)
+	testScaleOut(t, kc, data)
+	testScaleIn(t, kc)
 
 	// cleanup
 	redis.RemoveStandalone(t, kc, testName, redisNamespace)
 	DeleteKubernetesResources(t, kc, testNamespace, data, templates)
 }
 
-func testScaleUp(t *testing.T, kc *kubernetes.Clientset, data templateData) {
-	t.Log("--- testing scale up ---")
+func testScaleOut(t *testing.T, kc *kubernetes.Clientset, data templateData) {
+	t.Log("--- testing scale out ---")
 	data.ItemsToWrite = 20
 	KubectlApplyWithTemplate(t, data, "insertJobTemplate", insertJobTemplate)
 
@@ -192,8 +192,8 @@ func testScaleUp(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 		"replica count should be %d after 3 minutes", maxReplicaCount)
 }
 
-func testScaleDown(t *testing.T, kc *kubernetes.Clientset) {
-	t.Log("--- testing scale down ---")
+func testScaleIn(t *testing.T, kc *kubernetes.Clientset) {
+	t.Log("--- testing scale in ---")
 
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, minReplicaCount, 60, 3),
 		"replica count should be %d after 5 minutes", minReplicaCount)

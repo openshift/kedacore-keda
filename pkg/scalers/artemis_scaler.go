@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -65,12 +64,12 @@ func NewArtemisQueueScaler(config *ScalerConfig) (Scaler, error) {
 
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	artemisMetadata, err := parseArtemisMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing artemis metadata: %s", err)
+		return nil, fmt.Errorf("error parsing artemis metadata: %w", err)
 	}
 
 	return &artemisScaler{
@@ -125,7 +124,7 @@ func parseArtemisMetadata(config *ScalerConfig) (*artemisMetadata, error) {
 	if val, ok := config.TriggerMetadata["queueLength"]; ok {
 		queueLength, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("can't parse queueLength: %s", err)
+			return nil, fmt.Errorf("can't parse queueLength: %w", err)
 		}
 
 		meta.queueLength = queueLength
@@ -134,7 +133,7 @@ func parseArtemisMetadata(config *ScalerConfig) (*artemisMetadata, error) {
 	if val, ok := config.TriggerMetadata["activationQueueLength"]; ok {
 		activationQueueLength, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("can't parse activationQueueLength: %s", err)
+			return nil, fmt.Errorf("can't parse activationQueueLength: %w", err)
 		}
 
 		meta.activationQueueLength = activationQueueLength
@@ -177,29 +176,18 @@ func parseArtemisMetadata(config *ScalerConfig) (*artemisMetadata, error) {
 	return &meta, nil
 }
 
-// IsActive determines if we need to scale from zero
-func (s *artemisScaler) IsActive(ctx context.Context) (bool, error) {
-	messages, err := s.getQueueMessageCount(ctx)
-	if err != nil {
-		s.logger.Error(err, "Unable to access the artemis management endpoint", "managementEndpoint", s.metadata.managementEndpoint)
-		return false, err
-	}
-
-	return messages > s.metadata.activationQueueLength, nil
-}
-
 // getAPIParameters parse restAPITemplate to provide managementEndpoint , brokerName, brokerAddress, queueName
 func getAPIParameters(meta artemisMetadata) (artemisMetadata, error) {
 	u, err := url.ParseRequestURI(meta.restAPITemplate)
 	if err != nil {
-		return meta, fmt.Errorf("unable to parse the artemis restAPITemplate: %s", err)
+		return meta, fmt.Errorf("unable to parse the artemis restAPITemplate: %w", err)
 	}
 	meta.managementEndpoint = u.Host
 	splitURL := strings.Split(strings.Split(u.RawPath, ":")[1], "/")[0] // This returns : broker="<<brokerName>>",component=addresses,address="<<brokerAddress>>",subcomponent=queues,routing-type="anycast",queue="<<queueName>>"
 	replacer := strings.NewReplacer(",", "&", "\"\"", "")
 	v, err := url.ParseQuery(replacer.Replace(splitURL)) // This returns a map with key: string types and element type [] string. : map[address:["<<brokerAddress>>"] broker:["<<brokerName>>"] component:[addresses] queue:["<<queueName>>"] routing-type:["anycast"] subcomponent:[queues]]
 	if err != nil {
-		return meta, fmt.Errorf("unable to parse the artemis restAPITemplate: %s", err)
+		return meta, fmt.Errorf("unable to parse the artemis restAPITemplate: %w", err)
 	}
 
 	if len(v["address"][0]) == 0 {
@@ -239,13 +227,12 @@ func (s *artemisScaler) getQueueMessageCount(ctx context.Context) (int64, error)
 	url := s.getMonitoringEndpoint()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-
-	req.SetBasicAuth(s.metadata.username, s.metadata.password)
-	req.Header.Set("Origin", s.metadata.corsHeader)
-
 	if err != nil {
 		return -1, err
 	}
+	req.SetBasicAuth(s.metadata.username, s.metadata.password)
+	req.Header.Set("Origin", s.metadata.corsHeader)
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return -1, err
@@ -267,7 +254,7 @@ func (s *artemisScaler) getQueueMessageCount(ctx context.Context) (int64, error)
 	return messageCount, nil
 }
 
-func (s *artemisScaler) GetMetricSpecForScaling(ctx context.Context) []v2.MetricSpec {
+func (s *artemisScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
 			Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, kedautil.NormalizeString(fmt.Sprintf("artemis-%s", s.metadata.queueName))),
@@ -278,18 +265,18 @@ func (s *artemisScaler) GetMetricSpecForScaling(ctx context.Context) []v2.Metric
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *artemisScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *artemisScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	messages, err := s.getQueueMessageCount(ctx)
 
 	if err != nil {
 		s.logger.Error(err, "Unable to access the artemis management endpoint", "managementEndpoint", s.metadata.managementEndpoint)
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(messages))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, messages > s.metadata.activationQueueLength, nil
 }
 
 // Nothing to close here.

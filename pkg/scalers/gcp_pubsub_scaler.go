@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -50,14 +49,14 @@ type pubsubMetadata struct {
 func NewPubSubScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "gcp_pub_sub_scaler")
 
 	meta, err := parsePubSubMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing PubSub metadata: %s", err)
+		return nil, fmt.Errorf("error parsing PubSub metadata: %w", err)
 	}
 
 	return &pubsubScaler{
@@ -82,7 +81,7 @@ func parsePubSubMetadata(config *ScalerConfig, logger logr.Logger) (*pubsubMetad
 		meta.mode = pubsubModeSubscriptionSize
 		subSizeValue, err := strconv.ParseFloat(subSize, 64)
 		if err != nil {
-			return nil, fmt.Errorf("value parsing error %s", err.Error())
+			return nil, fmt.Errorf("value parsing error %w", err)
 		}
 		meta.value = subSizeValue
 	} else {
@@ -102,7 +101,7 @@ func parsePubSubMetadata(config *ScalerConfig, logger logr.Logger) (*pubsubMetad
 		if valuePresent {
 			triggerValue, err := strconv.ParseFloat(value, 64)
 			if err != nil {
-				return nil, fmt.Errorf("value parsing error %s", err.Error())
+				return nil, fmt.Errorf("value parsing error %w", err)
 			}
 			meta.value = triggerValue
 		}
@@ -122,7 +121,7 @@ func parsePubSubMetadata(config *ScalerConfig, logger logr.Logger) (*pubsubMetad
 	if val, ok := config.TriggerMetadata["activationValue"]; ok {
 		activationValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationValue parsing error %w", err)
 		}
 		meta.activationValue = activationValue
 	}
@@ -134,28 +133,6 @@ func parsePubSubMetadata(config *ScalerConfig, logger logr.Logger) (*pubsubMetad
 	meta.gcpAuthorization = auth
 	meta.scalerIndex = config.ScalerIndex
 	return &meta, nil
-}
-
-// IsActive checks if there are any messages in the subscription
-func (s *pubsubScaler) IsActive(ctx context.Context) (bool, error) {
-	switch s.metadata.mode {
-	case pubsubModeSubscriptionSize:
-		size, err := s.getMetrics(ctx, pubSubStackDriverSubscriptionSizeMetricName)
-		if err != nil {
-			s.logger.Error(err, "error getting Active Status")
-			return false, err
-		}
-		return size > s.metadata.activationValue, nil
-	case pubsubModeOldestUnackedMessageAge:
-		delay, err := s.getMetrics(ctx, pubSubStackDriverOldestUnackedMessageAgeMetricName)
-		if err != nil {
-			s.logger.Error(err, "error getting Active Status")
-			return false, err
-		}
-		return delay > s.metadata.activationValue, nil
-	default:
-		return false, errors.New("unknown mode")
-	}
 }
 
 func (s *pubsubScaler) Close(context.Context) error {
@@ -188,8 +165,8 @@ func (s *pubsubScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec 
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics connects to Stack Driver and finds the size of the pub sub subscription
-func (s *pubsubScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity connects to Stack Driver and finds the size of the pub sub subscription
+func (s *pubsubScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	var value float64
 	var err error
 
@@ -198,19 +175,19 @@ func (s *pubsubScaler) GetMetrics(ctx context.Context, metricName string, metric
 		value, err = s.getMetrics(ctx, pubSubStackDriverSubscriptionSizeMetricName)
 		if err != nil {
 			s.logger.Error(err, "error getting subscription size")
-			return []external_metrics.ExternalMetricValue{}, err
+			return []external_metrics.ExternalMetricValue{}, false, err
 		}
 	case pubsubModeOldestUnackedMessageAge:
 		value, err = s.getMetrics(ctx, pubSubStackDriverOldestUnackedMessageAgeMetricName)
 		if err != nil {
 			s.logger.Error(err, "error getting oldest unacked message age")
-			return []external_metrics.ExternalMetricValue{}, err
+			return []external_metrics.ExternalMetricValue{}, false, err
 		}
 	}
 
 	metric := GenerateMetricInMili(metricName, value)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, value > s.metadata.activationValue, nil
 }
 
 func (s *pubsubScaler) setStackdriverClient(ctx context.Context) error {

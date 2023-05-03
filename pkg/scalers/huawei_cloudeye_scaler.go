@@ -12,7 +12,6 @@ import (
 	"github.com/Huawei/gophercloud/openstack/ces/v1/metricdata"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -75,14 +74,14 @@ type huaweiAuthorizationMetadata struct {
 func NewHuaweiCloudeyeScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "huawei_cloudeye_scaler")
 
 	meta, err := parseHuaweiCloudeyeMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Cloudeye metadata: %s", err)
+		return nil, fmt.Errorf("error parsing Cloudeye metadata: %w", err)
 	}
 
 	return &huaweiCloudeyeScaler{
@@ -241,16 +240,16 @@ func gethuaweiAuthorization(authParams map[string]string) (huaweiAuthorizationMe
 	return meta, nil
 }
 
-func (s *huaweiCloudeyeScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+func (s *huaweiCloudeyeScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	metricValue, err := s.GetCloudeyeMetrics()
 
 	if err != nil {
 		s.logger.Error(err, "Error getting metric value")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, metricValue)
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, metricValue > s.metadata.activationTargetMetricValue, nil
 }
 
 func (s *huaweiCloudeyeScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
@@ -262,16 +261,6 @@ func (s *huaweiCloudeyeScaler) GetMetricSpecForScaling(context.Context) []v2.Met
 	}
 	metricSpec := v2.MetricSpec{External: externalMetric, Type: externalMetricType}
 	return []v2.MetricSpec{metricSpec}
-}
-
-func (s *huaweiCloudeyeScaler) IsActive(ctx context.Context) (bool, error) {
-	val, err := s.GetCloudeyeMetrics()
-
-	if err != nil {
-		return false, err
-	}
-
-	return val > s.metadata.activationTargetMetricValue, nil
 }
 
 func (s *huaweiCloudeyeScaler) Close(context.Context) error {

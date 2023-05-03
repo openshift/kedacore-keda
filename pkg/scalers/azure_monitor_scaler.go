@@ -25,7 +25,6 @@ import (
 	az "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -57,14 +56,14 @@ type azureMonitorMetadata struct {
 func NewAzureMonitorScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "azure_monitor_scaler")
 
 	meta, err := parseAzureMonitorMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing azure monitor metadata: %s", err)
+		return nil, fmt.Errorf("error parsing azure monitor metadata: %w", err)
 	}
 
 	return &azureMonitorScaler{
@@ -84,7 +83,7 @@ func parseAzureMonitorMetadata(config *ScalerConfig, logger logr.Logger) (*azure
 		targetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing azure monitor metadata", "targetValue", targetValueName)
-			return nil, fmt.Errorf("error parsing azure monitor metadata %s: %s", targetValueName, err.Error())
+			return nil, fmt.Errorf("error parsing azure monitor metadata %s: %w", targetValueName, err)
 		}
 		meta.targetValue = targetValue
 	} else {
@@ -95,7 +94,7 @@ func parseAzureMonitorMetadata(config *ScalerConfig, logger logr.Logger) (*azure
 		activationTargetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing azure monitor metadata", "targetValue", activationTargetValueName)
-			return nil, fmt.Errorf("error parsing azure monitor metadata %s: %s", activationTargetValueName, err.Error())
+			return nil, fmt.Errorf("error parsing azure monitor metadata %s: %w", activationTargetValueName, err)
 		}
 		meta.activationTargetValue = activationTargetValue
 	} else {
@@ -214,17 +213,6 @@ func parseAzurePodIdentityParams(config *ScalerConfig) (clientID string, clientP
 	return clientID, clientPassword, nil
 }
 
-// Returns true if the Azure Monitor metric value is greater than zero
-func (s *azureMonitorScaler) IsActive(ctx context.Context) (bool, error) {
-	val, err := azure.GetAzureMetricValue(ctx, s.metadata.azureMonitorInfo, s.podIdentity)
-	if err != nil {
-		s.logger.Error(err, "error getting azure monitor metric")
-		return false, err
-	}
-
-	return val > s.metadata.activationTargetValue, nil
-}
-
 func (s *azureMonitorScaler) Close(context.Context) error {
 	return nil
 }
@@ -240,15 +228,15 @@ func (s *azureMonitorScaler) GetMetricSpecForScaling(context.Context) []v2.Metri
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *azureMonitorScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *azureMonitorScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	val, err := azure.GetAzureMetricValue(ctx, s.metadata.azureMonitorInfo, s.podIdentity)
 	if err != nil {
 		s.logger.Error(err, "error getting azure monitor metric")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, val)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, val > s.metadata.activationTargetValue, nil
 }

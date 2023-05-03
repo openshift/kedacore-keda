@@ -5,19 +5,12 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/dynamodbstreams"
 	"github.com/aws/aws-sdk-go/service/dynamodbstreams/dynamodbstreamsiface"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -41,6 +34,7 @@ type awsDynamoDBStreamsMetadata struct {
 	activationTargetShardCount int64
 	tableName                  string
 	awsRegion                  string
+	awsEndpoint                string
 	awsAuthorization           awsAuthorizationMetadata
 	scalerIndex                int
 }
@@ -49,21 +43,21 @@ type awsDynamoDBStreamsMetadata struct {
 func NewAwsDynamoDBStreamsScaler(ctx context.Context, config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "aws_dynamodb_streams_scaler")
 
 	meta, err := parseAwsDynamoDBStreamsMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing dynamodb stream metadata: %s", err)
+		return nil, fmt.Errorf("error parsing dynamodb stream metadata: %w", err)
 	}
 
 	dbClient, dbStreamClient := createClientsForDynamoDBStreamsScaler(meta)
 
 	streamArn, err := getDynamoDBStreamsArn(ctx, dbClient, &meta.tableName)
 	if err != nil {
-		return nil, fmt.Errorf("error dynamodb stream arn: %s", err)
+		return nil, fmt.Errorf("error dynamodb stream arn: %w", err)
 	}
 
 	return &awsDynamoDBStreamsScaler{
@@ -83,6 +77,10 @@ func parseAwsDynamoDBStreamsMetadata(config *ScalerConfig, logger logr.Logger) (
 		meta.awsRegion = val
 	} else {
 		return nil, fmt.Errorf("no awsRegion given")
+	}
+
+	if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
+		meta.awsEndpoint = val
 	}
 
 	if val, ok := config.TriggerMetadata["tableName"]; ok && val != "" {
@@ -122,34 +120,16 @@ func parseAwsDynamoDBStreamsMetadata(config *ScalerConfig, logger logr.Logger) (
 }
 
 func createClientsForDynamoDBStreamsScaler(metadata *awsDynamoDBStreamsMetadata) (*dynamodb.DynamoDB, *dynamodbstreams.DynamoDBStreams) {
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region: aws.String(metadata.awsRegion),
-	}))
+	sess, config := getAwsConfig(metadata.awsRegion,
+		metadata.awsEndpoint,
+		metadata.awsAuthorization)
 
 	var dbClient *dynamodb.DynamoDB
 	var dbStreamClient *dynamodbstreams.DynamoDBStreams
 
-	if metadata.awsAuthorization.podIdentityOwner {
-		creds := credentials.NewStaticCredentials(metadata.awsAuthorization.awsAccessKeyID, metadata.awsAuthorization.awsSecretAccessKey, metadata.awsAuthorization.awsSessionToken)
-		if metadata.awsAuthorization.awsRoleArn != "" {
-			creds = stscreds.NewCredentials(sess, metadata.awsAuthorization.awsRoleArn)
-		}
-		dbClient = dynamodb.New(sess, &aws.Config{
-			Region:      aws.String(metadata.awsRegion),
-			Credentials: creds,
-		})
-		dbStreamClient = dynamodbstreams.New(sess, &aws.Config{
-			Region:      aws.String(metadata.awsRegion),
-			Credentials: creds,
-		})
-	} else {
-		dbClient = dynamodb.New(sess, &aws.Config{
-			Region: aws.String(metadata.awsRegion),
-		})
-		dbStreamClient = dynamodbstreams.New(sess, &aws.Config{
-			Region: aws.String(metadata.awsRegion),
-		})
-	}
+	dbClient = dynamodb.New(sess, config)
+	dbStreamClient = dynamodbstreams.New(sess, config)
+
 	return dbClient, dbStreamClient
 }
 
@@ -164,15 +144,6 @@ func getDynamoDBStreamsArn(ctx context.Context, db dynamodbiface.DynamoDBAPI, ta
 		return nil, fmt.Errorf("dynamodb stream arn for the table %s is empty", *tableName)
 	}
 	return tableOutput.Table.LatestStreamArn, nil
-}
-
-// IsActive determines if we need to scale from zero
-func (s *awsDynamoDBStreamsScaler) IsActive(ctx context.Context) (bool, error) {
-	count, err := s.GetDynamoDBStreamShardCount(ctx)
-	if err != nil {
-		return false, err
-	}
-	return count > s.metadata.activationTargetShardCount, nil
 }
 
 func (s *awsDynamoDBStreamsScaler) Close(context.Context) error {
@@ -190,22 +161,18 @@ func (s *awsDynamoDBStreamsScaler) GetMetricSpecForScaling(context.Context) []v2
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *awsDynamoDBStreamsScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *awsDynamoDBStreamsScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	shardCount, err := s.GetDynamoDBStreamShardCount(ctx)
 
 	if err != nil {
 		s.logger.Error(err, "error getting shard count")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
-	metric := external_metrics.ExternalMetricValue{
-		MetricName: metricName,
-		Value:      *resource.NewQuantity(shardCount, resource.DecimalSI),
-		Timestamp:  metav1.Now(),
-	}
+	metric := GenerateMetricInMili(metricName, float64(shardCount))
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, shardCount > s.metadata.activationTargetShardCount, nil
 }
 
 // Get DynamoDB Stream Shard Count

@@ -25,6 +25,7 @@ import (
 	az "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/go-logr/logr"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -34,23 +35,21 @@ import (
 type AzureKeyVaultHandler struct {
 	vault          *kedav1alpha1.AzureKeyVault
 	keyvaultClient *keyvault.BaseClient
-	podIdentity    kedav1alpha1.AuthPodIdentity
 }
 
-func NewAzureKeyVaultHandler(v *kedav1alpha1.AzureKeyVault, podIdentity kedav1alpha1.AuthPodIdentity) *AzureKeyVaultHandler {
+func NewAzureKeyVaultHandler(v *kedav1alpha1.AzureKeyVault) *AzureKeyVaultHandler {
 	return &AzureKeyVaultHandler{
-		vault:       v,
-		podIdentity: podIdentity,
+		vault: v,
 	}
 }
 
-func (vh *AzureKeyVaultHandler) Initialize(ctx context.Context, client client.Client, logger logr.Logger, triggerNamespace string) error {
+func (vh *AzureKeyVaultHandler) Initialize(ctx context.Context, client client.Client, logger logr.Logger, triggerNamespace string, secretsLister corev1listers.SecretLister) error {
 	keyvaultResourceURL, activeDirectoryEndpoint, err := vh.getPropertiesForCloud()
 	if err != nil {
 		return err
 	}
 
-	authConfig, err := vh.getAuthConfig(ctx, client, logger, triggerNamespace, keyvaultResourceURL, activeDirectoryEndpoint)
+	authConfig, err := vh.getAuthConfig(ctx, client, logger, triggerNamespace, keyvaultResourceURL, activeDirectoryEndpoint, secretsLister)
 	if err != nil {
 		return err
 	}
@@ -103,18 +102,27 @@ func (vh *AzureKeyVaultHandler) getPropertiesForCloud() (string, string, error) 
 }
 
 func (vh *AzureKeyVaultHandler) getAuthConfig(ctx context.Context, client client.Client, logger logr.Logger,
-	triggerNamespace, keyVaultResourceURL, activeDirectoryEndpoint string) (auth.AuthorizerConfig, error) {
-	switch vh.podIdentity.Provider {
+	triggerNamespace, keyVaultResourceURL, activeDirectoryEndpoint string, secretsLister corev1listers.SecretLister) (auth.AuthorizerConfig, error) {
+	podIdentity := vh.vault.PodIdentity
+	if podIdentity == nil {
+		podIdentity = &kedav1alpha1.AuthPodIdentity{}
+	}
+	switch podIdentity.Provider {
 	case "", kedav1alpha1.PodIdentityProviderNone:
+		missingErr := fmt.Errorf("clientID, tenantID and clientSecret are expected when not using a pod identity provider")
+		if vh.vault.Credentials == nil {
+			return nil, missingErr
+		}
+
 		clientID := vh.vault.Credentials.ClientID
 		tenantID := vh.vault.Credentials.TenantID
 
 		clientSecretName := vh.vault.Credentials.ClientSecret.ValueFrom.SecretKeyRef.Name
 		clientSecretKey := vh.vault.Credentials.ClientSecret.ValueFrom.SecretKeyRef.Key
-		clientSecret := resolveAuthSecret(ctx, client, logger, clientSecretName, triggerNamespace, clientSecretKey)
+		clientSecret := resolveAuthSecret(ctx, client, logger, clientSecretName, triggerNamespace, clientSecretKey, secretsLister)
 
 		if clientID == "" || tenantID == "" || clientSecret == "" {
-			return nil, fmt.Errorf("clientID, tenantID and clientSecret are expected when not using a pod identity provider")
+			return nil, missingErr
 		}
 
 		config := auth.NewClientCredentialsConfig(clientID, clientSecret, tenantID)
@@ -125,12 +133,12 @@ func (vh *AzureKeyVaultHandler) getAuthConfig(ctx context.Context, client client
 	case kedav1alpha1.PodIdentityProviderAzure:
 		config := auth.NewMSIConfig()
 		config.Resource = keyVaultResourceURL
-		config.ClientID = vh.podIdentity.IdentityID
+		config.ClientID = podIdentity.IdentityID
 
 		return config, nil
 	case kedav1alpha1.PodIdentityProviderAzureWorkload:
-		return azure.NewAzureADWorkloadIdentityConfig(ctx, vh.podIdentity.IdentityID, keyVaultResourceURL), nil
+		return azure.NewAzureADWorkloadIdentityConfig(ctx, podIdentity.IdentityID, keyVaultResourceURL), nil
 	default:
-		return nil, fmt.Errorf("key vault does not support pod identity provider - %s", vh.podIdentity)
+		return nil, fmt.Errorf("key vault does not support pod identity provider - %s", podIdentity)
 	}
 }

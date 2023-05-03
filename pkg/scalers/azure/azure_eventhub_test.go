@@ -227,6 +227,49 @@ func TestCheckpointFromBlobStorageGoSdk(t *testing.T) {
 	assert.Equal(t, check, expectedCheckpoint)
 }
 
+func TestCheckpointFromBlobStorageDapr(t *testing.T) {
+	if StorageConnectionString == "" {
+		return
+	}
+
+	partitionID := "0"
+	offset := "1004"
+	consumerGroup := "$default"
+	eventhubName := "hub"
+
+	sequencenumber := int64(1)
+
+	containerName := fmt.Sprintf("dapr-%s-%s-%s", eventhubName, consumerGroup, partitionID)
+	checkpointFormat := "{\"partitionID\":\"%s\",\"epoch\":0,\"owner\":\"\",\"checkpoint\":{\"offset\":\"%s\",\"sequenceNumber\":%d,\"enqueueTime\":\"\"},\"state\":\"\",\"token\":\"\"}"
+	checkpoint := fmt.Sprintf(checkpointFormat, partitionID, offset, sequencenumber)
+
+	urlPath := ""
+
+	ctx, err := createNewCheckpointInStorage(urlPath, containerName, partitionID, checkpoint, nil)
+	assert.Equal(t, err, nil)
+
+	expectedCheckpoint := Checkpoint{
+		baseCheckpoint: baseCheckpoint{
+			Offset: offset,
+		},
+		PartitionID:    partitionID,
+		SequenceNumber: sequencenumber,
+	}
+
+	eventHubInfo := EventHubInfo{
+		EventHubConnection: fmt.Sprintf("Endpoint=sb://eventhubnamespace.servicebus.windows.net/;EntityPath=%s", eventhubName),
+		StorageConnection:  StorageConnectionString,
+		EventHubName:       eventhubName,
+		BlobContainer:      containerName,
+		CheckpointStrategy: "dapr",
+	}
+
+	check, _ := GetCheckpointFromBlobStorage(ctx, http.DefaultClient, eventHubInfo, partitionID)
+	_ = check.Offset
+	_ = expectedCheckpoint.Offset
+	assert.Equal(t, check, expectedCheckpoint)
+}
+
 func TestShouldParseCheckpointForFunction(t *testing.T) {
 	eventHubInfo := EventHubInfo{
 		EventHubConnection:    "Endpoint=sb://eventhubnamespace.servicebus.windows.net/;EntityPath=hub-test",
@@ -368,6 +411,36 @@ func TestShouldParseCheckpointForGoSdk(t *testing.T) {
 	assert.Equal(t, url.Path, "/containername/0")
 }
 
+func TestShouldParseCheckpointForDapr(t *testing.T) {
+	eventHubInfo := EventHubInfo{
+		EventHubConnection:    "Endpoint=sb://eventhubnamespace.servicebus.windows.net/;EntityPath=hub-test",
+		EventHubConsumerGroup: "$default",
+		BlobContainer:         "containername",
+		CheckpointStrategy:    "dapr",
+	}
+
+	cp := newCheckpointer(eventHubInfo, "0")
+	url, _ := cp.resolvePath(eventHubInfo)
+
+	assert.Equal(t, url.Path, "/containername/dapr-hub-test-$default-0")
+}
+
+func TestShouldParseCheckpointForDaprWithPodIdentity(t *testing.T) {
+	eventHubInfo := EventHubInfo{
+		Namespace:                "eventhubnamespace",
+		EventHubName:             "hub-test",
+		EventHubConsumerGroup:    "$default",
+		ServiceBusEndpointSuffix: "servicebus.windows.net",
+		BlobContainer:            "containername",
+		CheckpointStrategy:       "dapr",
+	}
+
+	cp := newCheckpointer(eventHubInfo, "0")
+	url, _ := cp.resolvePath(eventHubInfo)
+
+	assert.Equal(t, url.Path, "/containername/dapr-hub-test-$default-0")
+}
+
 func createNewCheckpointInStorage(urlPath string, containerName string, partitionID string, checkpoint string, metadata map[string]string) (context.Context, error) {
 	ctx := context.Background()
 
@@ -384,7 +457,7 @@ func createNewCheckpointInStorage(urlPath string, containerName string, partitio
 	if err != nil {
 		if stErr, ok := err.(azblob.StorageError); ok {
 			if stErr.ServiceCode() == azblob.ServiceCodeContainerAlreadyExists {
-				return ctx, fmt.Errorf("failed to create container: %s", err)
+				return ctx, fmt.Errorf("failed to create container: %w", err)
 			}
 		}
 	}
@@ -400,7 +473,7 @@ func createNewCheckpointInStorage(urlPath string, containerName string, partitio
 		Metadata:    metadata,
 		Parallelism: 16})
 	if err != nil {
-		return ctx, fmt.Errorf("Err uploading file to blob: %s", err)
+		return ctx, fmt.Errorf("Err uploading file to blob: %w", err)
 	}
 	return ctx, nil
 }

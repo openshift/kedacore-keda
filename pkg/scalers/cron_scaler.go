@@ -10,7 +10,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/robfig/cron/v3"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -39,12 +38,12 @@ type cronMetadata struct {
 func NewCronScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	meta, parseErr := parseCronMetadata(config)
 	if parseErr != nil {
-		return nil, fmt.Errorf("error parsing cron metadata: %s", parseErr)
+		return nil, fmt.Errorf("error parsing cron metadata: %w", parseErr)
 	}
 
 	return &cronScaler{
@@ -83,7 +82,7 @@ func parseCronMetadata(config *ScalerConfig) (*cronMetadata, error) {
 	if val, ok := config.TriggerMetadata["start"]; ok && val != "" {
 		_, err := parser.Parse(val)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing start schedule: %s", err)
+			return nil, fmt.Errorf("error parsing start schedule: %w", err)
 		}
 		meta.start = val
 	} else {
@@ -92,7 +91,7 @@ func parseCronMetadata(config *ScalerConfig) (*cronMetadata, error) {
 	if val, ok := config.TriggerMetadata["end"]; ok && val != "" {
 		_, err := parser.Parse(val)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing end schedule: %s", err)
+			return nil, fmt.Errorf("error parsing end schedule: %w", err)
 		}
 		meta.end = val
 	} else {
@@ -113,35 +112,6 @@ func parseCronMetadata(config *ScalerConfig) (*cronMetadata, error) {
 	}
 	meta.scalerIndex = config.ScalerIndex
 	return &meta, nil
-}
-
-// IsActive checks if the startTime or endTime has reached
-func (s *cronScaler) IsActive(ctx context.Context) (bool, error) {
-	location, err := time.LoadLocation(s.metadata.timezone)
-	if err != nil {
-		return false, fmt.Errorf("unable to load timezone. Error: %s", err)
-	}
-
-	nextStartTime, startTimecronErr := getCronTime(location, s.metadata.start)
-	if startTimecronErr != nil {
-		return false, fmt.Errorf("error initializing start cron: %s", startTimecronErr)
-	}
-
-	nextEndTime, endTimecronErr := getCronTime(location, s.metadata.end)
-	if endTimecronErr != nil {
-		return false, fmt.Errorf("error intializing end cron: %s", endTimecronErr)
-	}
-
-	// Since we are considering the timestamp here and not the exact time, timezone does matter.
-	currentTime := time.Now().Unix()
-	switch {
-	case nextStartTime < nextEndTime && currentTime < nextStartTime:
-		return false, nil
-	case currentTime <= nextEndTime:
-		return true, nil
-	default:
-		return false, nil
-	}
 }
 
 func (s *cronScaler) Close(context.Context) error {
@@ -169,20 +139,37 @@ func (s *cronScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics finds the current value of the metric
-func (s *cronScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
-	var currentReplicas = int64(defaultDesiredReplicas)
-	isActive, err := s.IsActive(ctx)
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
+func (s *cronScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+	var defaultDesiredReplicas = int64(defaultDesiredReplicas)
+
+	location, err := time.LoadLocation(s.metadata.timezone)
 	if err != nil {
-		s.logger.Error(err, "error")
-		return []external_metrics.ExternalMetricValue{}, err
-	}
-	if isActive {
-		currentReplicas = s.metadata.desiredReplicas
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("unable to load timezone. Error: %w", err)
 	}
 
-	/*******************************************************************************/
-	metric := GenerateMetricInMili(metricName, float64(currentReplicas))
+	// Since we are considering the timestamp here and not the exact time, timezone does matter.
+	currentTime := time.Now().Unix()
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	nextStartTime, startTimecronErr := getCronTime(location, s.metadata.start)
+	if startTimecronErr != nil {
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error initializing start cron: %w", startTimecronErr)
+	}
+
+	nextEndTime, endTimecronErr := getCronTime(location, s.metadata.end)
+	if endTimecronErr != nil {
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error intializing end cron: %w", endTimecronErr)
+	}
+
+	switch {
+	case nextStartTime < nextEndTime && currentTime < nextStartTime:
+		metric := GenerateMetricInMili(metricName, float64(defaultDesiredReplicas))
+		return []external_metrics.ExternalMetricValue{metric}, false, nil
+	case currentTime <= nextEndTime:
+		metric := GenerateMetricInMili(metricName, float64(s.metadata.desiredReplicas))
+		return []external_metrics.ExternalMetricValue{metric}, true, nil
+	default:
+		metric := GenerateMetricInMili(metricName, float64(defaultDesiredReplicas))
+		return []external_metrics.ExternalMetricValue{metric}, false, nil
+	}
 }

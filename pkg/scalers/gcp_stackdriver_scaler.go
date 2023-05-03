@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"strconv"
 
+	monitoringpb "cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/go-logr/logr"
-	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -40,14 +39,14 @@ type stackdriverMetadata struct {
 func NewStackdriverScaler(ctx context.Context, config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	logger := InitializeLogger(config, "gcp_stackdriver_scaler")
 
 	meta, err := parseStackdriverMetadata(config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Stackdriver metadata: %s", err)
+		return nil, fmt.Errorf("error parsing Stackdriver metadata: %w", err)
 	}
 
 	client, err := initializeStackdriverClient(ctx, meta.gcpAuthorization, logger)
@@ -95,7 +94,7 @@ func parseStackdriverMetadata(config *ScalerConfig, logger logr.Logger) (*stackd
 		targetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			logger.Error(err, "Error parsing targetValue")
-			return nil, fmt.Errorf("error parsing targetValue: %s", err.Error())
+			return nil, fmt.Errorf("error parsing targetValue: %w", err)
 		}
 
 		meta.targetValue = targetValue
@@ -105,7 +104,7 @@ func parseStackdriverMetadata(config *ScalerConfig, logger logr.Logger) (*stackd
 	if val, ok := config.TriggerMetadata["activationTargetValue"]; ok {
 		activationTargetValue, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationTargetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationTargetValue parsing error %w", err)
 		}
 		meta.activationTargetValue = activationTargetValue
 	}
@@ -116,10 +115,11 @@ func parseStackdriverMetadata(config *ScalerConfig, logger logr.Logger) (*stackd
 	}
 	meta.gcpAuthorization = auth
 
-	meta.aggregation, err = parseAggregation(config, logger)
+	aggregation, err := parseAggregation(config, logger)
 	if err != nil {
 		return nil, err
 	}
+	meta.aggregation = aggregation
 
 	return &meta, nil
 }
@@ -137,7 +137,7 @@ func parseAggregation(config *ScalerConfig, logger logr.Logger) (*monitoringpb.A
 		}
 		if err != nil {
 			logger.Error(err, "Error parsing alignmentPeriodSeconds")
-			return nil, fmt.Errorf("error parsing alignmentPeriodSeconds: %s", err.Error())
+			return nil, fmt.Errorf("error parsing alignmentPeriodSeconds: %w", err)
 		}
 
 		return NewStackdriverAggregator(val, config.TriggerMetadata["alignmentAligner"], config.TriggerMetadata["alignmentReducer"])
@@ -160,15 +160,6 @@ func initializeStackdriverClient(ctx context.Context, gcpAuthorization *gcpAutho
 		return nil, err
 	}
 	return client, nil
-}
-
-func (s *stackdriverScaler) IsActive(ctx context.Context) (bool, error) {
-	value, err := s.getMetrics(ctx)
-	if err != nil {
-		s.logger.Error(err, "error getting metric value")
-		return false, err
-	}
-	return value > s.metadata.activationTargetValue, nil
 }
 
 func (s *stackdriverScaler) Close(context.Context) error {
@@ -201,17 +192,17 @@ func (s *stackdriverScaler) GetMetricSpecForScaling(context.Context) []v2.Metric
 	return []v2.MetricSpec{metricSpec}
 }
 
-// GetMetrics connects to Stack Driver and retrieves the metric
-func (s *stackdriverScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// GetMetricsAndActivity connects to Stack Driver and retrieves the metric
+func (s *stackdriverScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	value, err := s.getMetrics(ctx)
 	if err != nil {
 		s.logger.Error(err, "error getting metric value")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, value)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, value > s.metadata.activationTargetValue, nil
 }
 
 // getMetrics gets metric type value from stackdriver api

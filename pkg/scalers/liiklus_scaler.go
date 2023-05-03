@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	liiklus_service "github.com/kedacore/keda/v2/pkg/scalers/liiklus"
@@ -47,11 +46,22 @@ const (
 	liiklusMetricType                       = "External"
 )
 
+var (
+	// ErrLiiklusNoTopic is returned when "topic" in the config is empty.
+	ErrLiiklusNoTopic = errors.New("no topic provided")
+
+	// ErrLiiklusNoAddress is returned when "address" in the config is empty.
+	ErrLiiklusNoAddress = errors.New("no liiklus API address provided")
+
+	// ErrLiiklusNoGroup is returned when "group" in the config is empty.
+	ErrLiiklusNoGroup = errors.New("no consumer group provided")
+)
+
 // NewLiiklusScaler creates a new liiklusScaler scaler
 func NewLiiklusScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	lm, err := parseLiiklusMetadata(config)
@@ -75,19 +85,19 @@ func NewLiiklusScaler(config *ScalerConfig) (Scaler, error) {
 	return &scaler, nil
 }
 
-func (s *liiklusScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+func (s *liiklusScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	totalLag, lags, err := s.getLag(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if totalLag/uint64(s.metadata.lagThreshold) > uint64(len(lags)) {
 		totalLag = uint64(s.metadata.lagThreshold) * uint64(len(lags))
 	}
 
-	return []external_metrics.ExternalMetricValue{
-		GenerateMetricInMili(metricName, float64(totalLag)),
-	}, nil
+	metric := GenerateMetricInMili(metricName, float64(totalLag))
+
+	return []external_metrics.ExternalMetricValue{metric}, totalLag > uint64(s.metadata.activationLagThreshold), nil
 }
 
 func (s *liiklusScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
@@ -104,18 +114,11 @@ func (s *liiklusScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec
 func (s *liiklusScaler) Close(context.Context) error {
 	err := s.connection.Close()
 	if err != nil {
+		s.logger.Error(err, "Error closing liiklus connection")
 		return err
 	}
-	return nil
-}
 
-// IsActive returns true if there is any lag on any partition.
-func (s *liiklusScaler) IsActive(ctx context.Context) (bool, error) {
-	lag, _, err := s.getLag(ctx)
-	if err != nil {
-		return false, err
-	}
-	return lag > uint64(s.metadata.activationLagThreshold), nil
+	return nil
 }
 
 // getLag returns the total lag, as well as per-partition lag for this scaler. That is, the difference between the
@@ -159,7 +162,7 @@ func parseLiiklusMetadata(config *ScalerConfig) (*liiklusMetadata, error) {
 	if val, ok := config.TriggerMetadata[liiklusLagThresholdMetricName]; ok {
 		t, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing %s: %s", liiklusLagThresholdMetricName, err)
+			return nil, fmt.Errorf("error parsing %s: %w", liiklusLagThresholdMetricName, err)
 		}
 		lagThreshold = t
 	}
@@ -167,27 +170,27 @@ func parseLiiklusMetadata(config *ScalerConfig) (*liiklusMetadata, error) {
 	if val, ok := config.TriggerMetadata[liiklusActivationLagThresholdMetricName]; ok {
 		t, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing %s: %s", liiklusActivationLagThresholdMetricName, err)
+			return nil, fmt.Errorf("error parsing %s: %w", liiklusActivationLagThresholdMetricName, err)
 		}
 		activationLagThreshold = t
 	}
 
 	groupVersion := uint32(0)
 	if val, ok := config.TriggerMetadata["groupVersion"]; ok {
-		t, err := strconv.ParseInt(val, 10, 32)
+		t, err := strconv.ParseUint(val, 10, 32)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing groupVersion: %s", err)
+			return nil, fmt.Errorf("error parsing groupVersion: %w", err)
 		}
 		groupVersion = uint32(t)
 	}
 
 	switch {
 	case config.TriggerMetadata["topic"] == "":
-		return nil, errors.New("no topic provided")
+		return nil, ErrLiiklusNoTopic
 	case config.TriggerMetadata["address"] == "":
-		return nil, errors.New("no liiklus API address provided")
+		return nil, ErrLiiklusNoAddress
 	case config.TriggerMetadata["group"] == "":
-		return nil, errors.New("no consumer group provided")
+		return nil, ErrLiiklusNoGroup
 	}
 
 	return &liiklusMetadata{

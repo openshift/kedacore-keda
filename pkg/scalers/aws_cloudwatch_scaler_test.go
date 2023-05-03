@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudwatch/cloudwatchiface"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/labels"
 )
 
 const (
@@ -85,7 +84,8 @@ var testAWSCloudwatchMetadata = []parseAWSCloudwatchMetadataTestData{
 		"metricCollectionTime":        "300",
 		"metricStat":                  "Average",
 		"metricStatPeriod":            "300",
-		"awsRegion":                   "eu-west-1"},
+		"awsRegion":                   "eu-west-1",
+		"awsEndpoint":                 "http://localhost:4566"},
 		testAWSAuthentication, false,
 		"Properly formed cloudwatch query with optional parameters"},
 	// properly formed cloudwatch query but Region is empty
@@ -357,9 +357,9 @@ var testAWSCloudwatchMetadata = []parseAWSCloudwatchMetadataTestData{
 }
 
 var awsCloudwatchMetricIdentifiers = []awsCloudwatchMetricIdentifier{
-	{&testAWSCloudwatchMetadata[1], 0, "s0-aws-cloudwatch-QueueName"},
-	{&testAWSCloudwatchMetadata[1], 3, "s3-aws-cloudwatch-QueueName"},
-	{&testAWSCloudwatchMetadata[2], 5, "s5-aws-cloudwatch-ApproximateNumberOfMessagesVisible"},
+	{&testAWSCloudwatchMetadata[1], 0, "s0-aws-cloudwatch"},
+	{&testAWSCloudwatchMetadata[1], 3, "s3-aws-cloudwatch"},
+	{&testAWSCloudwatchMetadata[2], 5, "s5-aws-cloudwatch"},
 }
 
 var awsCloudwatchGetMetricTestData = []awsCloudwatchMetadata{
@@ -499,10 +499,9 @@ func TestAWSCloudwatchGetMetricSpecForScaling(t *testing.T) {
 }
 
 func TestAWSCloudwatchScalerGetMetrics(t *testing.T) {
-	var selector labels.Selector
 	for _, meta := range awsCloudwatchGetMetricTestData {
 		mockAWSCloudwatchScaler := awsCloudwatchScaler{"", &meta, &mockCloudwatch{}, logr.Discard()}
-		value, err := mockAWSCloudwatchScaler.GetMetrics(context.Background(), meta.metricsName, selector)
+		value, _, err := mockAWSCloudwatchScaler.GetMetricsAndActivity(context.Background(), meta.metricsName)
 		switch meta.metricsName {
 		case testAWSCloudwatchErrorMetric:
 			assert.Error(t, err, "expect error because of cloudwatch api error")

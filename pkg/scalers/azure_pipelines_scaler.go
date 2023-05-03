@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -20,6 +20,92 @@ import (
 const (
 	defaultTargetPipelinesQueueLength = 1
 )
+
+type JobRequests struct {
+	Count int          `json:"count"`
+	Value []JobRequest `json:"value"`
+}
+
+type JobRequest struct {
+	RequestID     int       `json:"requestId"`
+	QueueTime     time.Time `json:"queueTime"`
+	AssignTime    time.Time `json:"assignTime,omitempty"`
+	ReceiveTime   time.Time `json:"receiveTime,omitempty"`
+	LockedUntil   time.Time `json:"lockedUntil,omitempty"`
+	ServiceOwner  string    `json:"serviceOwner"`
+	HostID        string    `json:"hostId"`
+	Result        *string   `json:"result"`
+	ScopeID       string    `json:"scopeId"`
+	PlanType      string    `json:"planType"`
+	PlanID        string    `json:"planId"`
+	JobID         string    `json:"jobId"`
+	Demands       []string  `json:"demands"`
+	ReservedAgent *struct {
+		Links struct {
+			Self struct {
+				Href string `json:"href"`
+			} `json:"self"`
+			Web struct {
+				Href string `json:"href"`
+			} `json:"web"`
+		} `json:"_links"`
+		ID                int    `json:"id"`
+		Name              string `json:"name"`
+		Version           string `json:"version"`
+		OsDescription     string `json:"osDescription"`
+		Enabled           bool   `json:"enabled"`
+		Status            string `json:"status"`
+		ProvisioningState string `json:"provisioningState"`
+		AccessPoint       string `json:"accessPoint"`
+	} `json:"reservedAgent,omitempty"`
+	Definition struct {
+		Links struct {
+			Web struct {
+				Href string `json:"href"`
+			} `json:"web"`
+			Self struct {
+				Href string `json:"href"`
+			} `json:"self"`
+		} `json:"_links"`
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"definition"`
+	Owner struct {
+		Links struct {
+			Web struct {
+				Href string `json:"href"`
+			} `json:"web"`
+			Self struct {
+				Href string `json:"href"`
+			} `json:"self"`
+		} `json:"_links"`
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"owner"`
+	Data struct {
+		ParallelismTag string `json:"ParallelismTag"`
+		IsScheduledKey string `json:"IsScheduledKey"`
+	} `json:"data"`
+	PoolID          int    `json:"poolId"`
+	OrchestrationID string `json:"orchestrationId"`
+	Priority        int    `json:"priority"`
+	MatchedAgents   *[]struct {
+		Links struct {
+			Self struct {
+				Href string `json:"href"`
+			} `json:"self"`
+			Web struct {
+				Href string `json:"href"`
+			} `json:"web"`
+		} `json:"_links"`
+		ID                int    `json:"id"`
+		Name              string `json:"name"`
+		Version           string `json:"version"`
+		Enabled           bool   `json:"enabled"`
+		Status            string `json:"status"`
+		ProvisioningState string `json:"provisioningState"`
+	} `json:"matchedAgents,omitempty"`
+}
 
 type azurePipelinesPoolNameResponse struct {
 	Value []struct {
@@ -47,7 +133,9 @@ type azurePipelinesMetadata struct {
 	poolID                               int
 	targetPipelinesQueueLength           int64
 	activationTargetPipelinesQueueLength int64
+	jobsToFetch                          int64
 	scalerIndex                          int
+	requireAllDemands                    bool
 }
 
 // NewAzurePipelinesScaler creates a new AzurePipelinesScaler
@@ -56,12 +144,12 @@ func NewAzurePipelinesScaler(ctx context.Context, config *ScalerConfig) (Scaler,
 
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	meta, err := parseAzurePipelinesMetadata(ctx, config, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing azure Pipelines metadata: %s", err)
+		return nil, fmt.Errorf("error parsing azure Pipelines metadata: %w", err)
 	}
 
 	return &azurePipelinesScaler{
@@ -79,7 +167,7 @@ func parseAzurePipelinesMetadata(ctx context.Context, config *ScalerConfig, http
 	if val, ok := config.TriggerMetadata["targetPipelinesQueueLength"]; ok {
 		queueLength, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing azure pipelines metadata targetPipelinesQueueLength: %s", err.Error())
+			return nil, fmt.Errorf("error parsing azure pipelines metadata targetPipelinesQueueLength: %w", err)
 		}
 
 		meta.targetPipelinesQueueLength = queueLength
@@ -89,7 +177,7 @@ func parseAzurePipelinesMetadata(ctx context.Context, config *ScalerConfig, http
 	if val, ok := config.TriggerMetadata["activationTargetPipelinesQueueLength"]; ok {
 		activationQueueLength, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing azure pipelines metadata activationTargetPipelinesQueueLength: %s", err.Error())
+			return nil, fmt.Errorf("error parsing azure pipelines metadata activationTargetPipelinesQueueLength: %w", err)
 		}
 
 		meta.activationTargetPipelinesQueueLength = activationQueueLength
@@ -131,19 +219,39 @@ func parseAzurePipelinesMetadata(ctx context.Context, config *ScalerConfig, http
 		meta.demands = ""
 	}
 
-	if val, ok := config.TriggerMetadata["poolName"]; ok && val != "" {
-		var err error
-		meta.poolID, err = getPoolIDFromName(ctx, val, &meta, httpClient)
+	meta.jobsToFetch = 250
+	if val, ok := config.TriggerMetadata["jobsToFetch"]; ok && val != "" {
+		jobsToFetch, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing jobsToFetch: %w", err)
+		}
+		meta.jobsToFetch = jobsToFetch
+	}
+
+	meta.requireAllDemands = false
+	if val, ok := config.TriggerMetadata["requireAllDemands"]; ok && val != "" {
+		requireAllDemands, err := strconv.ParseBool(val)
 		if err != nil {
 			return nil, err
 		}
+		meta.requireAllDemands = requireAllDemands
+	}
+
+	if val, ok := config.TriggerMetadata["poolName"]; ok && val != "" {
+		var err error
+		poolID, err := getPoolIDFromName(ctx, val, &meta, httpClient)
+		if err != nil {
+			return nil, err
+		}
+		meta.poolID = poolID
 	} else {
 		if val, ok := config.TriggerMetadata["poolID"]; ok && val != "" {
 			var err error
-			meta.poolID, err = validatePoolID(ctx, val, &meta, httpClient)
+			poolID, err := validatePoolID(ctx, val, &meta, httpClient)
 			if err != nil {
 				return nil, err
 			}
+			meta.poolID = poolID
 		} else {
 			return nil, fmt.Errorf("no poolName or poolID given")
 		}
@@ -185,7 +293,7 @@ func validatePoolID(ctx context.Context, poolID string, metadata *azurePipelines
 	url := fmt.Sprintf("%s/_apis/distributedtask/pools?poolID=%s", metadata.organizationURL, poolID)
 	body, err := getAzurePipelineRequest(ctx, url, metadata, httpClient)
 	if err != nil {
-		return -1, fmt.Errorf("agent pool with id `%s` not found", poolID)
+		return -1, fmt.Errorf("agent pool with id `%s` not found: %w", poolID, err)
 	}
 
 	var result azurePipelinesPoolIDResponse
@@ -223,94 +331,101 @@ func getAzurePipelineRequest(ctx context.Context, url string, metadata *azurePip
 	return b, nil
 }
 
-func (s *azurePipelinesScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
-	queuelen, err := s.GetAzurePipelinesQueueLength(ctx)
-
-	if err != nil {
-		s.logger.Error(err, "error getting pipelines queue length")
-		return []external_metrics.ExternalMetricValue{}, err
-	}
-
-	metric := GenerateMetricInMili(metricName, float64(queuelen))
-
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
-}
-
 func (s *azurePipelinesScaler) GetAzurePipelinesQueueLength(ctx context.Context) (int64, error) {
-	url := fmt.Sprintf("%s/_apis/distributedtask/pools/%d/jobrequests", s.metadata.organizationURL, s.metadata.poolID)
+	// HotFix Issue (#4387), $top changes the format of the returned JSON
+	var url string
+	if s.metadata.parent != "" {
+		url = fmt.Sprintf("%s/_apis/distributedtask/pools/%d/jobrequests", s.metadata.organizationURL, s.metadata.poolID)
+	} else {
+		url = fmt.Sprintf("%s/_apis/distributedtask/pools/%d/jobrequests?$top=%d", s.metadata.organizationURL, s.metadata.poolID, s.metadata.jobsToFetch)
+	}
 	body, err := getAzurePipelineRequest(ctx, url, s.metadata, s.httpClient)
 	if err != nil {
 		return -1, err
 	}
 
-	var result map[string]interface{}
-	err = json.Unmarshal(body, &result)
+	var jrs JobRequests
+	err = json.Unmarshal(body, &jrs)
 	if err != nil {
+		s.logger.Error(err, "Cannot unmarshal ADO JobRequests API response")
 		return -1, err
 	}
 
+	// for each job check if its parent fulfilled, then demand fulfilled, then finally pool fulfilled
 	var count int64
-	jobs, ok := result["value"].([]interface{})
-
-	if !ok {
-		return -1, fmt.Errorf("the Azure DevOps REST API result returned no value data despite successful code. url: %s", url)
-	}
-
-	// for each job check if it parent fulfilled, then demand fulfilled, then finally pool fulfilled
-	for _, value := range jobs {
-		v := value.(map[string]interface{})
-		if v["result"] == nil {
-			if s.metadata.parent == "" && s.metadata.demands == "" {
-				// no plan defined, just add a count
-				count++
+	for _, job := range stripDeadJobs(jrs.Value) {
+		if s.metadata.parent == "" && s.metadata.demands == "" {
+			// no plan defined, just add a count
+			count++
+		} else {
+			if s.metadata.parent == "" {
+				// doesn't use parent, switch to demand
+				if getCanAgentDemandFulfilJob(job, s.metadata) {
+					count++
+				}
 			} else {
-				if s.metadata.parent == "" {
-					// doesn't use parent, switch to demand
-					if getCanAgentDemandFulfilJob(v, s.metadata) {
-						count++
-					}
-				} else {
-					// does use parent
-					if getCanAgentParentFulfilJob(v, s.metadata) {
-						count++
-					}
+				// does use parent
+				if getCanAgentParentFulfilJob(job, s.metadata) {
+					count++
 				}
 			}
 		}
 	}
+
 	return count, err
 }
 
+func stripDeadJobs(jobs []JobRequest) []JobRequest {
+	var filtered []JobRequest
+	for _, job := range jobs {
+		if job.Result == nil {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func stripAgentVFromArray(array []string) []string {
+	var result []string
+
+	for _, item := range array {
+		if !strings.HasPrefix(item, "Agent.Version") {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 // Determine if the scaledjob has the right demands to spin up
-func getCanAgentDemandFulfilJob(v map[string]interface{}, metadata *azurePipelinesMetadata) bool {
-	var demandsReq = v["demands"].([]interface{})
-	var demandsAvail = strings.Split(metadata.demands, ",")
-	var countDemands = 0
-	for _, dr := range demandsReq {
-		for _, da := range demandsAvail {
-			strDr := fmt.Sprintf("%v", dr)
-			if !strings.HasPrefix(strDr, "Agent.Version") {
-				if strDr == da {
-					countDemands++
-				}
+func getCanAgentDemandFulfilJob(jr JobRequest, metadata *azurePipelinesMetadata) bool {
+	countDemands := 0
+	demandsInJob := stripAgentVFromArray(jr.Demands)
+	demandsInScaler := stripAgentVFromArray(strings.Split(metadata.demands, ","))
+
+	for _, demandInJob := range demandsInJob {
+		for _, demandInScaler := range demandsInScaler {
+			if demandInJob == demandInScaler {
+				countDemands++
 			}
 		}
 	}
 
-	return countDemands == len(demandsReq)-1
+	if metadata.requireAllDemands {
+		return countDemands == len(demandsInJob) && countDemands == len(demandsInScaler)
+	}
+	return countDemands == len(demandsInJob)
 }
 
 // Determine if the Job and Parent Agent Template have matching capabilities
-func getCanAgentParentFulfilJob(v map[string]interface{}, metadata *azurePipelinesMetadata) bool {
-	matchedAgents, ok := v["matchedAgents"].([]interface{})
-	if !ok {
-		// ADO is already processing
+func getCanAgentParentFulfilJob(jr JobRequest, metadata *azurePipelinesMetadata) bool {
+	matchedAgents := jr.MatchedAgents
+
+	if matchedAgents == nil {
 		return false
 	}
 
-	for _, m := range matchedAgents {
-		n := m.(map[string]interface{})
-		if metadata.parent == n["name"].(string) {
+	for _, m := range *matchedAgents {
+		if metadata.parent == m.Name {
 			return true
 		}
 	}
@@ -328,15 +443,17 @@ func (s *azurePipelinesScaler) GetMetricSpecForScaling(context.Context) []v2.Met
 	return []v2.MetricSpec{metricSpec}
 }
 
-func (s *azurePipelinesScaler) IsActive(ctx context.Context) (bool, error) {
-	queuelen, err := s.GetAzurePipelinesQueueLength(ctx)
+func (s *azurePipelinesScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+	queueLen, err := s.GetAzurePipelinesQueueLength(ctx)
 
 	if err != nil {
-		s.logger.Error(err, "error)")
-		return false, err
+		s.logger.Error(err, "error getting pipelines queue length")
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
-	return queuelen > s.metadata.activationTargetPipelinesQueueLength, nil
+	metric := GenerateMetricInMili(metricName, float64(queueLen))
+
+	return []external_metrics.ExternalMetricValue{metric}, queueLen > s.metadata.activationTargetPipelinesQueueLength, nil
 }
 
 func (s *azurePipelinesScaler) Close(context.Context) error {

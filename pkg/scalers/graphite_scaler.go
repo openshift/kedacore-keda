@@ -11,15 +11,17 @@ import (
 
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
 const (
-	graphiteServerAddress              = "serverAddress"
-	graphiteMetricName                 = "metricName"
+	graphiteServerAddress = "serverAddress"
+
+	// FIXME: DEPRECATED to be removed in v2.12
+	graphiteMetricName = "metricName"
+
 	graphiteQuery                      = "query"
 	graphiteThreshold                  = "threshold"
 	graphiteActivationThreshold        = "activationThreshold"
@@ -60,12 +62,12 @@ type grapQueryResult []struct {
 func NewGraphiteScaler(config *ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
-		return nil, fmt.Errorf("error getting scaler metric type: %s", err)
+		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
 	}
 
 	meta, err := parseGraphiteMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing graphite metadata: %s", err)
+		return nil, fmt.Errorf("error parsing graphite metadata: %w", err)
 	}
 
 	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false)
@@ -93,10 +95,11 @@ func parseGraphiteMetadata(config *ScalerConfig) (*graphiteMetadata, error) {
 		return nil, fmt.Errorf("no %s given", graphiteQuery)
 	}
 
+	// FIXME: DEPRECATED to be removed in v2.12
 	if val, ok := config.TriggerMetadata[graphiteMetricName]; ok && val != "" {
 		meta.metricName = val
 	} else {
-		return nil, fmt.Errorf("no %s given", graphiteMetricName)
+		meta.metricName = "graphite"
 	}
 
 	if val, ok := config.TriggerMetadata[graphiteQueryTime]; ok && val != "" {
@@ -109,7 +112,7 @@ func parseGraphiteMetadata(config *ScalerConfig) (*graphiteMetadata, error) {
 	if val, ok := config.TriggerMetadata[graphiteThreshold]; ok && val != "" {
 		t, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing %s: %s", graphiteThreshold, err)
+			return nil, fmt.Errorf("error parsing %s: %w", graphiteThreshold, err)
 		}
 
 		meta.threshold = t
@@ -119,7 +122,7 @@ func parseGraphiteMetadata(config *ScalerConfig) (*graphiteMetadata, error) {
 	if val, ok := config.TriggerMetadata[graphiteActivationThreshold]; ok {
 		t, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return nil, fmt.Errorf("activationTargetValue parsing error %s", err.Error())
+			return nil, fmt.Errorf("activationTargetValue parsing error %w", err)
 		}
 
 		meta.activationThreshold = t
@@ -147,16 +150,6 @@ func parseGraphiteMetadata(config *ScalerConfig) (*graphiteMetadata, error) {
 	meta.enableBasicAuth = true
 
 	return &meta, nil
-}
-
-func (s *graphiteScaler) IsActive(ctx context.Context) (bool, error) {
-	val, err := s.executeGrapQuery(ctx)
-	if err != nil {
-		s.logger.Error(err, "error executing graphite query")
-		return false, err
-	}
-
-	return val > s.metadata.activationThreshold, nil
 }
 
 func (s *graphiteScaler) Close(context.Context) error {
@@ -224,14 +217,14 @@ func (s *graphiteScaler) executeGrapQuery(ctx context.Context) (float64, error) 
 	return -1, fmt.Errorf("no valid non-null response in query %s, try increasing your queryTime or check your query", s.metadata.query)
 }
 
-func (s *graphiteScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+func (s *graphiteScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	val, err := s.executeGrapQuery(ctx)
 	if err != nil {
 		s.logger.Error(err, "error executing graphite query")
-		return []external_metrics.ExternalMetricValue{}, err
+		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, val)
 
-	return append([]external_metrics.ExternalMetricValue{}, metric), nil
+	return []external_metrics.ExternalMetricValue{metric}, val > s.metadata.activationThreshold, nil
 }
