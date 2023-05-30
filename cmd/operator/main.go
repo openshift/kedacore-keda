@@ -69,6 +69,30 @@ func getWatchNamespace() (string, error) {
 	return ns, nil
 }
 
+// checkCertRotationWebhookUpdate verifies that valid options are passed via the --cert-rotation-webhook-update flags
+// returns a string slice of invalid options and updated validatingWebhookName and apiServiceName values
+func checkCertRotationWebhookUpdate(certRotationWebhookUpdate []string, validatingWebhookName string, apiServiceName string) ([]string, string, string) {
+	var badWebhookRotateOpts []string
+	var validatingWebhookFound, apiserviceWebhookFound bool
+	for _, wh := range certRotationWebhookUpdate {
+		switch wh {
+		case "validating":
+			validatingWebhookFound = true
+		case "apiservice":
+			apiserviceWebhookFound = true
+		default:
+			badWebhookRotateOpts = append(badWebhookRotateOpts, wh)
+		}
+	}
+	if !validatingWebhookFound {
+		validatingWebhookName = ""
+	}
+	if !apiserviceWebhookFound {
+		apiServiceName = ""
+	}
+	return badWebhookRotateOpts, validatingWebhookName, apiServiceName
+}
+
 func main() {
 	var metricsAddr string
 	var probeAddr string
@@ -83,7 +107,9 @@ func main() {
 	var metricsServerServiceName string
 	var webhooksServiceName string
 	var enableCertRotation bool
+	var certRotationWebhookUpdate []string
 	var validatingWebhookName string
+	var apiServiceName string = "v1beta1.external.metrics.k8s.io"
 	pflag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	pflag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	pflag.StringVar(&metricsServiceAddr, "metrics-service-bind-address", ":9666", "The address the gRPRC Metrics Service endpoint binds to.")
@@ -99,6 +125,7 @@ func main() {
 	pflag.StringVar(&metricsServerServiceName, "metrics-server-service-name", "keda-metrics-apiserver", "Metrics server service name. Defaults to keda-metrics-apiserver")
 	pflag.StringVar(&webhooksServiceName, "webhooks-service-name", "keda-admission-webhooks", "Webhook service name. Defaults to keda-admission-webhooks")
 	pflag.BoolVar(&enableCertRotation, "enable-cert-rotation", false, "enable automatic generation and rotation of TLS certificates/keys")
+	pflag.StringSliceVar(&certRotationWebhookUpdate, "cert-rotation-webhook-update", []string{"validating", "apiservice"}, "enable automatic updating of webhooks CA certs. Ignored unless --enable-cert-rotation=true")
 	pflag.StringVar(&validatingWebhookName, "validating-webhook-name", "keda-admission", "ValidatingWebhookConfiguration name. Defaults to keda-admission")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
@@ -107,6 +134,13 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	ctx := ctrl.SetupSignalHandler()
+
+	var badWebhookRotateOpts []string
+	if badWebhookRotateOpts, validatingWebhookName, apiServiceName = checkCertRotationWebhookUpdate(certRotationWebhookUpdate, validatingWebhookName, apiServiceName); len(badWebhookRotateOpts) > 0 {
+		setupLog.Error(nil, "Invalid value for --cert-rotation-webhook-update. Valid values are 'validating' and 'apiservice'.", "invalid values", badWebhookRotateOpts)
+		os.Exit(1)
+	}
+
 	namespace, err := getWatchNamespace()
 	if err != nil {
 		setupLog.Error(err, "failed to get watch namespace")
@@ -263,7 +297,7 @@ func main() {
 			CAName:                "KEDA",
 			CAOrganization:        "KEDAORG",
 			ValidatingWebhookName: validatingWebhookName,
-			APIServiceName:        "v1beta1.external.metrics.k8s.io",
+			APIServiceName:        apiServiceName,
 			Logger:                setupLog,
 			Ready:                 certReady,
 		}
