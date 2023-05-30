@@ -52,16 +52,7 @@ type CertManager struct {
 
 // AddCertificateRotation registers all needed services to generate the certificates and patches needed resources with the caBundle
 func (cm CertManager) AddCertificateRotation(ctx context.Context, mgr manager.Manager) error {
-	var rotatorHooks = []rotator.WebhookInfo{
-		{
-			Name: cm.ValidatingWebhookName,
-			Type: rotator.Validating,
-		},
-		{
-			Name: cm.APIServiceName,
-			Type: rotator.APIService,
-		},
-	}
+	var rotatorHooks = []rotator.WebhookInfo{}
 
 	err := cm.ensureSecret(ctx, mgr, cm.SecretName)
 	if err != nil {
