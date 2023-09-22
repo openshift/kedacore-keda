@@ -194,7 +194,9 @@ func TestNATSJetStreamScaler(t *testing.T) {
 	CreateKubernetesResources(t, kc, testNamespace, data, templates)
 
 	// Create stream and consumer.
-	installStreamAndConsumer(t, testNamespace, natsAddress)
+	data.NatsStream = "standalone"
+	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", nats.ScaledObjectTemplate)
+	installStreamAndConsumer(t, data.NatsStream, testNamespace, natsAddress)
 	assert.True(t, WaitForJobSuccess(t, kc, "stream", testNamespace, 60, 3),
 		"stream and consumer creation job should be success")
 
@@ -203,21 +205,21 @@ func TestNATSJetStreamScaler(t *testing.T) {
 	testScaleIn(t, kc)
 
 	// Cleanup nats namespace
-	removeServerWithJetStream(t, kc, natsNamespace)
-	DeleteNamespace(t, kc, natsNamespace)
-	deleted := WaitForNamespaceDeletion(t, kc, natsNamespace)
+	removeServerWithJetStream(t, natsNamespace)
+	DeleteNamespace(t, natsNamespace)
+	deleted := WaitForNamespaceDeletion(t, natsNamespace)
 	assert.Truef(t, deleted, "%s namespace not deleted", natsNamespace)
 	// Cleanup test namespace
-	DeleteKubernetesResources(t, kc, testNamespace, data, templates)
+	DeleteKubernetesResources(t, testNamespace, data, templates)
 }
 
 // installStreamAndConsumer creates stream and consumer.
-func installStreamAndConsumer(t *testing.T, namespace, natsAddress string) {
+func installStreamAndConsumer(t *testing.T, stream, namespace, natsAddress string) {
 	data := nats.JetStreamTemplateData{
 		TestNamespace:  namespace,
 		NatsAddress:    natsAddress,
 		NatsConsumer:   nats.NatsJetStreamConsumerName,
-		NatsStream:     nats.NatsJetStreamStreamName,
+		NatsStream:     stream,
 		StreamReplicas: 1,
 	}
 
@@ -236,14 +238,14 @@ func installServerWithJetStream(t *testing.T, kc *k8s.Clientset, namespace strin
 }
 
 // removeServerWithJetStream will remove the NATS server and delete the namespace.
-func removeServerWithJetStream(t *testing.T, kc *k8s.Clientset, namespace string) {
+func removeServerWithJetStream(t *testing.T, namespace string) {
 	data := nats.JetStreamTemplateData{
 		NatsNamespace: namespace,
 		NatsVersion:   nats.NatsJetStreamServerVersion,
 	}
 
 	KubectlDeleteWithTemplate(t, data, "natsServerTemplate", natsServerTemplate)
-	DeleteNamespace(t, kc, namespace)
+	DeleteNamespace(t, namespace)
 }
 
 func testActivation(t *testing.T, kc *k8s.Clientset, data nats.JetStreamDeploymentTemplateData) {

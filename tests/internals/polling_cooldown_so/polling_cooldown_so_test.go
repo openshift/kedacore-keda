@@ -30,9 +30,10 @@ var (
 	scaledObjectName            = fmt.Sprintf("%s-so", testName)
 	secretName                  = fmt.Sprintf("%s-secret", testName)
 	metricsServerEndpoint       = fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/api/value", serviceName, namespace)
+	hpaName                     = fmt.Sprintf("%s-hpa", testName)
 	minReplicas                 = 0
-	maxReplicas                 = 5
-	pollingInterval             = 0
+	maxReplicas                 = 1
+	pollingInterval             = 1 // (don't set it to 0 to avoid cpu leaks)
 	cooldownPeriod              = 0
 )
 
@@ -50,6 +51,7 @@ type templateData struct {
 	MetricValue                 int
 	PollingInterval             int
 	CooldownPeriod              int
+	CustomHpaName               string
 }
 
 const (
@@ -143,6 +145,9 @@ metadata:
 spec:
   scaleTargetRef:
     name: {{.DeploymentName}}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      name: {{.CustomHpaName}}
   pollingInterval: {{.PollingInterval}}
   cooldownPeriod: {{.CooldownPeriod}}
   minReplicaCount: {{.MinReplicas}}
@@ -162,9 +167,11 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: update-ms-value-
+  name: update-ms-value
   namespace: {{.TestNamespace}}
 spec:
+  ttlSecondsAfterFinished: 0
+  backoffLimit: 4
   template:
     spec:
       containers:
@@ -172,7 +179,7 @@ spec:
         image: curlimages/curl
         imagePullPolicy: Always
         command: ["curl", "-X", "POST", "{{.MetricsServerEndpoint}}/{{.MetricValue}}"]
-      restartPolicy: Never
+      restartPolicy: OnFailure
 `
 
 	serviceTemplate = `
@@ -190,11 +197,6 @@ spec:
 `
 )
 
-// use KubectlCreateWithTemplate() function because applying yaml template
-// for update-metrics relies on the previous job to be deleted
-// (job is immutable), but in this case the test runs too fast at some
-// points that job is not finished & deleted in time
-
 func TestPollingInterval(t *testing.T) {
 	// setup
 	t.Log("--- setting up ---")
@@ -202,85 +204,109 @@ func TestPollingInterval(t *testing.T) {
 	data, templates := getTemplateData()
 	CreateKubernetesResources(t, kc, namespace, data, templates)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, minReplicas, 180, 3),
-		"replica count should be %d after 3 minutes", minReplicas)
-
 	testPollingIntervalUp(t, kc, data)
 	testPollingIntervalDown(t, kc, data)
 	testCooldownPeriod(t, kc, data)
 
-	DeleteKubernetesResources(t, kc, namespace, data, templates)
+	DeleteKubernetesResources(t, namespace, data, templates)
 }
 
 func testPollingIntervalUp(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	t.Log("--- test Polling Interval up ---")
 
 	data.MetricValue = 0
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 0, 180, 3),
-		"replica count should be %d after 3 minutes", 0)
+	// wait some seconds to finish the job
+	WaitForJobCount(t, kc, namespace, 0, 15, 2)
 
-	// wait for atleast 60+5 seconds before getting new metric
-	data.PollingInterval = 60 + 5 // 5 seconds as a reserve
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, minReplicas, 18, 10),
+		"replica count should be %d after 3 minutes", minReplicas)
+
+	// wait for atleast 60+15 seconds before getting new metric
+	data.PollingInterval = 60 + 15 // 15 seconds as a reserve
 	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 
-	data.MetricValue = 1
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	// wait until HPA to ensure that ScaledObject reconciliation loop has happened
+	_, err := WaitForHpaCreation(t, kc, hpaName, namespace, 60, 2)
+	assert.NoError(t, err)
 
-	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, 0, 60)
+	data.MetricValue = maxReplicas
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 1, 180, 3),
-		"replica count should be %d after 3 minutes", 1)
+	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, minReplicas, 60)
+
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, maxReplicas, 12, 10),
+		"replica count should be %d after 2 minutes", maxReplicas)
+
+	KubectlDeleteWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 }
 
 func testPollingIntervalDown(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	t.Log("--- test Polling Interval down ---")
 
-	data.CooldownPeriod = 0 // remove cooldownPeriod to test PI
-	data.PollingInterval = 1
-	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
-
 	data.MetricValue = 1
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 1, 180, 3),
-		"replica count should be %d after 3 minutes", 1)
+	// wait some seconds to finish the job
+	WaitForJobCount(t, kc, namespace, 0, 15, 2)
 
-	// wait for atleast 60+5 seconds before getting new metric
-	data.PollingInterval = 60 + 5 // 5 seconds as a reserve
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, maxReplicas, 18, 10),
+		"replica count should be %d after 3 minutes", minReplicas)
 
+	// wait for atleast 60+15 seconds before getting new metric
+	data.PollingInterval = 60 + 15 // 15 seconds as a reserve
+	data.CooldownPeriod = 0
 	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 
-	data.MetricValue = 0 // go to minReplicas
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	// wait until HPA to ensure that ScaledObject reconciliation loop has happened
+	_, err := WaitForHpaCreation(t, kc, hpaName, namespace, 60, 2)
+	assert.NoError(t, err)
 
-	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, 1, 60)
+	data.MetricValue = minReplicas
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 0, 180, 3),
-		"replica count should be %d after 3 minutes", 0)
+	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, maxReplicas, 60)
+
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, minReplicas, 12, 10),
+		"replica count should be %d after 1 minutes", maxReplicas)
+
+	KubectlDeleteWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 }
 
 func testCooldownPeriod(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	t.Log("--- test Cooldown Period ---")
 
-	data.PollingInterval = 0     // remove polling interval to test CP
-	data.CooldownPeriod = 60 + 5 // 5 seconds as a reserve
+	data.PollingInterval = 5
+	data.CooldownPeriod = 0
 	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 
 	data.MetricValue = 1
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 1, 180, 3),
+	// wait some seconds to finish the job
+	WaitForJobCount(t, kc, namespace, 0, 15, 2)
+
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, maxReplicas, 18, 10),
 		"replica count should be %d after 3 minutes", 1)
 
+	data.PollingInterval = 5      // remove polling interval to test CP (don't set it to 0 to avoid cpu leaks)
+	data.CooldownPeriod = 60 + 15 // 15 seconds as a reserve
+	KubectlApplyWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
+
+	// wait until HPA to ensure that ScaledObject reconciliation loop has happened
+	_, err := WaitForHpaCreation(t, kc, hpaName, namespace, 60, 2)
+	assert.NoError(t, err)
+
 	data.MetricValue = 0
-	KubectlCreateWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
+	KubectlApplyWithTemplate(t, data, "updateMetricsTemplate", updateMetricsTemplate)
 
-	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, 1, 60)
+	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, namespace, maxReplicas, 60)
 
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, 0, 180, 3),
-		"replica count should be %d after 3 minutes", 0)
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, namespace, minReplicas, 6, 10),
+		"replica count should be %d after 1 minute", minReplicas)
+
+	KubectlDeleteWithTemplate(t, data, "scaledObjectTemplate", scaledObjectTemplate)
 }
 
 func getTemplateData() (templateData, []Template) {
@@ -298,12 +324,12 @@ func getTemplateData() (templateData, []Template) {
 			MetricValue:                 0,
 			PollingInterval:             pollingInterval,
 			CooldownPeriod:              cooldownPeriod,
+			CustomHpaName:               hpaName,
 		}, []Template{
 			{Name: "secretTemplate", Config: secretTemplate},
 			{Name: "metricsServerDeploymentTemplate", Config: metricsServerDeploymentTemplate},
 			{Name: "serviceTemplate", Config: serviceTemplate},
 			{Name: "triggerAuthenticationTemplate", Config: triggerAuthenticationTemplate},
 			{Name: "deploymentTemplate", Config: deploymentTemplate},
-			{Name: "scaledObjectTemplate", Config: scaledObjectTemplate},
 		}
 }

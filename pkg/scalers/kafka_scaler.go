@@ -54,6 +54,7 @@ type kafkaMetadata struct {
 	// OAUTHBEARER
 	scopes                []string
 	oauthTokenEndpointURI string
+	oauthExtensions       map[string]string
 
 	// TLS
 	enableTLS   bool
@@ -133,7 +134,6 @@ func parseKafkaAuthParams(config *ScalerConfig, meta *kafkaMetadata) error {
 	default:
 		saslAuthType = ""
 	}
-
 	if val, ok := config.AuthParams["sasl"]; ok {
 		if saslAuthType != "" {
 			return errors.New("unable to set `sasl` in both ScaledObject and TriggerAuthentication together")
@@ -142,6 +142,7 @@ func parseKafkaAuthParams(config *ScalerConfig, meta *kafkaMetadata) error {
 	}
 
 	if saslAuthType != "" {
+		saslAuthType = strings.TrimSpace(saslAuthType)
 		mode := kafkaSaslType(saslAuthType)
 
 		if mode == KafkaSASLTypePlaintext || mode == KafkaSASLTypeSCRAMSHA256 || mode == KafkaSASLTypeSCRAMSHA512 || mode == KafkaSASLTypeOAuthbearer {
@@ -163,6 +164,18 @@ func parseKafkaAuthParams(config *ScalerConfig, meta *kafkaMetadata) error {
 					return errors.New("no oauth token endpoint uri given")
 				}
 				meta.oauthTokenEndpointURI = strings.TrimSpace(config.AuthParams["oauthTokenEndpointUri"])
+
+				meta.oauthExtensions = make(map[string]string)
+				oauthExtensionsRaw := config.AuthParams["oauthExtensions"]
+				if oauthExtensionsRaw != "" {
+					for _, extension := range strings.Split(oauthExtensionsRaw, ",") {
+						splittedExtension := strings.Split(extension, "=")
+						if len(splittedExtension) != 2 {
+							return errors.New("invalid OAuthBearer extension, must be of format key=value")
+						}
+						meta.oauthExtensions[splittedExtension[0]] = splittedExtension[1]
+					}
+				}
 			}
 		} else {
 			return fmt.Errorf("err SASL mode %s given", mode)
@@ -382,7 +395,7 @@ func getKafkaClients(metadata kafkaMetadata) (sarama.Client, sarama.ClusterAdmin
 
 	if metadata.saslType == KafkaSASLTypeOAuthbearer {
 		config.Net.SASL.Mechanism = sarama.SASLTypeOAuth
-		config.Net.SASL.TokenProvider = OAuthBearerTokenProvider(metadata.username, metadata.password, metadata.oauthTokenEndpointURI, metadata.scopes)
+		config.Net.SASL.TokenProvider = OAuthBearerTokenProvider(metadata.username, metadata.password, metadata.oauthTokenEndpointURI, metadata.scopes, metadata.oauthExtensions)
 	}
 
 	client, err := sarama.NewClient(metadata.bootstrapServers, config)
@@ -603,7 +616,7 @@ func (s *kafkaScaler) getConsumerAndProducerOffsets(topicPartitions map[string][
 }
 
 // GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
-func (s *kafkaScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+func (s *kafkaScaler) GetMetricsAndActivity(_ context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	totalLag, totalLagWithPersistent, err := s.getTotalLag()
 	if err != nil {
 		return []external_metrics.ExternalMetricValue{}, false, err

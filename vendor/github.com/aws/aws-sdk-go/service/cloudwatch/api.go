@@ -62,7 +62,10 @@ func (c *CloudWatch) DeleteAlarmsRequest(input *DeleteAlarmsInput) (req *request
 // you could delete 99 metric alarms and one composite alarms with one operation,
 // but you can't delete two composite alarms with one operation.
 //
-// In the event of an error, no alarms are deleted.
+// If you specify an incorrect alarm name or make any other error in the operation,
+// no alarms are deleted. To confirm that alarms were deleted successfully,
+// you can use the DescribeAlarms (https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html)
+// operation after using DeleteAlarms.
 //
 // It is possible to create a loop or cycle of composite alarms, where composite
 // alarm A depends on composite alarm B, and composite alarm B also depends
@@ -3394,16 +3397,18 @@ func (c *CloudWatch) PutMetricAlarmRequest(input *PutMetricAlarmInput) (req *req
 // If you are an IAM user, you must have Amazon EC2 permissions for some alarm
 // operations:
 //
-//   - The iam:CreateServiceLinkedRole for all alarms with EC2 actions
+//   - The iam:CreateServiceLinkedRole permission for all alarms with EC2 actions
 //
-//   - The iam:CreateServiceLinkedRole to create an alarm with Systems Manager
-//     OpsItem actions.
+//   - The iam:CreateServiceLinkedRole permissions to create an alarm with
+//     Systems Manager OpsItem or response plan actions.
 //
 // The first time you create an alarm in the Amazon Web Services Management
 // Console, the CLI, or by using the PutMetricAlarm API, CloudWatch creates
 // the necessary service-linked role for you. The service-linked roles are called
 // AWSServiceRoleForCloudWatchEvents and AWSServiceRoleForCloudWatchAlarms_ActionSSM.
 // For more information, see Amazon Web Services service-linked role (https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_terms-and-concepts.html#iam-term-service-linked-role).
+//
+// Each PutMetricAlarm action has a maximum uncompressed payload of 120 KB.
 //
 // # Cross-account alarms
 //
@@ -4860,7 +4865,7 @@ func (s *Datapoint) SetUnit(v string) *Datapoint {
 type DeleteAlarmsInput struct {
 	_ struct{} `type:"structure"`
 
-	// The alarms to be deleted.
+	// The alarms to be deleted. Do not enclose the alarm names in quote marks.
 	//
 	// AlarmNames is a required field
 	AlarmNames []*string `type:"list" required:"true"`
@@ -6110,13 +6115,15 @@ type Dimension struct {
 
 	// The name of the dimension. Dimension names must contain only ASCII characters,
 	// must include at least one non-whitespace character, and cannot start with
-	// a colon (:).
+	// a colon (:). ASCII control characters are not supported as part of dimension
+	// names.
 	//
 	// Name is a required field
 	Name *string `min:"1" type:"string" required:"true"`
 
 	// The value of the dimension. Dimension values must contain only ASCII characters
-	// and must include at least one non-whitespace character.
+	// and must include at least one non-whitespace character. ASCII control characters
+	// are not supported as part of dimension values.
 	//
 	// Value is a required field
 	Value *string `min:"1" type:"string" required:"true"`
@@ -9947,12 +9954,31 @@ func (s *MetricStreamEntry) SetState(v string) *MetricStreamEntry {
 	return s
 }
 
-// This structure contains the name of one of the metric namespaces that is
-// listed in a filter of a metric stream.
+// This structure contains a metric namespace and optionally, a list of metric
+// names, to either include in a metric stream or exclude from a metric stream.
+//
+// A metric stream's filters can include up to 1000 total names. This limit
+// applies to the sum of namespace names and metric names in the filters. For
+// example, this could include 10 metric namespace filters with 99 metrics each,
+// or 20 namespace filters with 49 metrics specified in each filter.
 type MetricStreamFilter struct {
 	_ struct{} `type:"structure"`
 
-	// The name of the metric namespace in the filter.
+	// The names of the metrics to either include or exclude from the metric stream.
+	//
+	// If you omit this parameter, all metrics in the namespace are included or
+	// excluded, depending on whether this filter is specified as an exclude filter
+	// or an include filter.
+	//
+	// Each metric name can contain only ASCII printable characters (ASCII range
+	// 32 through 126). Each metric name must contain at least one non-whitespace
+	// character.
+	MetricNames []*string `type:"list"`
+
+	// The name of the metric namespace for this filter.
+	//
+	// The namespace can contain only ASCII printable characters (ASCII range 32
+	// through 126). It must contain at least one non-whitespace character.
 	Namespace *string `min:"1" type:"string"`
 }
 
@@ -9985,6 +10011,12 @@ func (s *MetricStreamFilter) Validate() error {
 		return invalidParams
 	}
 	return nil
+}
+
+// SetMetricNames sets the MetricNames field's value.
+func (s *MetricStreamFilter) SetMetricNames(v []*string) *MetricStreamFilter {
+	s.MetricNames = v
+	return s
 }
 
 // SetNamespace sets the Namespace field's value.
@@ -10997,22 +11029,48 @@ type PutMetricAlarmInput struct {
 
 	// The actions to execute when this alarm transitions to the ALARM state from
 	// any other state. Each action is specified as an Amazon Resource Name (ARN).
+	// Valid values:
 	//
-	// Valid Values: arn:aws:automate:region:ec2:stop | arn:aws:automate:region:ec2:terminate
-	// | arn:aws:automate:region:ec2:recover | arn:aws:automate:region:ec2:reboot
-	// | arn:aws:sns:region:account-id:sns-topic-name | arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
-	// | arn:aws:ssm:region:account-id:opsitem:severity | arn:aws:ssm-incidents::account-id:response-plan:response-plan-name
+	// EC2 actions:
 	//
-	// Valid Values (for use with IAM roles): arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Recover/1.0
+	//    * arn:aws:automate:region:ec2:stop
+	//
+	//    * arn:aws:automate:region:ec2:terminate
+	//
+	//    * arn:aws:automate:region:ec2:reboot
+	//
+	//    * arn:aws:automate:region:ec2:recover
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Recover/1.0
+	//
+	// Autoscaling action:
+	//
+	//    * arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SNS notification action:
+	//
+	//    * arn:aws:sns:region:account-id:sns-topic-name:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SSM integration actions:
+	//
+	//    * arn:aws:ssm:region:account-id:opsitem:severity#CATEGORY=category-name
+	//
+	//    * arn:aws:ssm-incidents::account-id:responseplan/response-plan-name
 	AlarmActions []*string `type:"list"`
 
 	// The description for the alarm.
 	AlarmDescription *string `type:"string"`
 
 	// The name for the alarm. This name must be unique within the Region.
+	//
+	// The name must contain only UTF-8 characters, and can't contain ASCII control
+	// characters
 	//
 	// AlarmName is a required field
 	AlarmName *string `min:"1" type:"string" required:"true"`
@@ -11065,15 +11123,39 @@ type PutMetricAlarmInput struct {
 
 	// The actions to execute when this alarm transitions to the INSUFFICIENT_DATA
 	// state from any other state. Each action is specified as an Amazon Resource
-	// Name (ARN).
+	// Name (ARN). Valid values:
 	//
-	// Valid Values: arn:aws:automate:region:ec2:stop | arn:aws:automate:region:ec2:terminate
-	// | arn:aws:automate:region:ec2:recover | arn:aws:automate:region:ec2:reboot
-	// | arn:aws:sns:region:account-id:sns-topic-name | arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	// EC2 actions:
 	//
-	// Valid Values (for use with IAM roles): >arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
+	//    * arn:aws:automate:region:ec2:stop
+	//
+	//    * arn:aws:automate:region:ec2:terminate
+	//
+	//    * arn:aws:automate:region:ec2:reboot
+	//
+	//    * arn:aws:automate:region:ec2:recover
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Recover/1.0
+	//
+	// Autoscaling action:
+	//
+	//    * arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SNS notification action:
+	//
+	//    * arn:aws:sns:region:account-id:sns-topic-name:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SSM integration actions:
+	//
+	//    * arn:aws:ssm:region:account-id:opsitem:severity#CATEGORY=category-name
+	//
+	//    * arn:aws:ssm-incidents::account-id:responseplan/response-plan-name
 	InsufficientDataActions []*string `type:"list"`
 
 	// The name for the metric associated with the alarm. For each PutMetricAlarm
@@ -11106,16 +11188,40 @@ type PutMetricAlarmInput struct {
 	Namespace *string `min:"1" type:"string"`
 
 	// The actions to execute when this alarm transitions to an OK state from any
-	// other state. Each action is specified as an Amazon Resource Name (ARN).
+	// other state. Each action is specified as an Amazon Resource Name (ARN). Valid
+	// values:
 	//
-	// Valid Values: arn:aws:automate:region:ec2:stop | arn:aws:automate:region:ec2:terminate
-	// | arn:aws:automate:region:ec2:recover | arn:aws:automate:region:ec2:reboot
-	// | arn:aws:sns:region:account-id:sns-topic-name | arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	// EC2 actions:
 	//
-	// Valid Values (for use with IAM roles): arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
-	// | arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Recover/1.0
+	//    * arn:aws:automate:region:ec2:stop
+	//
+	//    * arn:aws:automate:region:ec2:terminate
+	//
+	//    * arn:aws:automate:region:ec2:reboot
+	//
+	//    * arn:aws:automate:region:ec2:recover
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Stop/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Terminate/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Reboot/1.0
+	//
+	//    * arn:aws:swf:region:account-id:action/actions/AWS_EC2.InstanceId.Recover/1.0
+	//
+	// Autoscaling action:
+	//
+	//    * arn:aws:autoscaling:region:account-id:scalingPolicy:policy-id:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SNS notification action:
+	//
+	//    * arn:aws:sns:region:account-id:sns-topic-name:autoScalingGroupName/group-friendly-name:policyName/policy-friendly-name
+	//
+	// SSM integration actions:
+	//
+	//    * arn:aws:ssm:region:account-id:opsitem:severity#CATEGORY=category-name
+	//
+	//    * arn:aws:ssm-incidents::account-id:responseplan/response-plan-name
 	OKActions []*string `type:"list"`
 
 	// The length, in seconds, used each time the metric specified in MetricName
@@ -11463,7 +11569,8 @@ type PutMetricDataInput struct {
 	// MetricData is a required field
 	MetricData []*MetricDatum `type:"list" required:"true"`
 
-	// The namespace for the metric data.
+	// The namespace for the metric data. You can use ASCII characters for the namespace,
+	// except for control characters which are not supported.
 	//
 	// To avoid conflicts with Amazon Web Services service namespaces, you should
 	// not specify a namespace that begins with AWS/

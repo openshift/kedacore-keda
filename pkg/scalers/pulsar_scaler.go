@@ -95,7 +95,8 @@ type pulsarStats struct {
 
 // NewPulsarScaler creates a new PulsarScaler
 func NewPulsarScaler(config *ScalerConfig) (Scaler, error) {
-	pulsarMetadata, err := parsePulsarMetadata(config)
+	logger := InitializeLogger(config, "pulsar_scaler")
+	pulsarMetadata, err := parsePulsarMetadata(config, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing pulsar metadata: %w", err)
 	}
@@ -125,11 +126,11 @@ func NewPulsarScaler(config *ScalerConfig) (Scaler, error) {
 	return &pulsarScaler{
 		client:   client,
 		metadata: pulsarMetadata,
-		logger:   InitializeLogger(config, "pulsar_scaler"),
+		logger:   logger,
 	}, nil
 }
 
-func parsePulsarMetadata(config *ScalerConfig) (pulsarMetadata, error) {
+func parsePulsarMetadata(config *ScalerConfig, logger logr.Logger) (pulsarMetadata, error) {
 	meta := pulsarMetadata{}
 	switch {
 	case config.TriggerMetadata["adminURLFromEnv"] != "":
@@ -178,13 +179,24 @@ func parsePulsarMetadata(config *ScalerConfig) (pulsarMetadata, error) {
 
 	meta.msgBacklogThreshold = defaultMsgBacklogThreshold
 
+	// FIXME: msgBacklog support DEPRECATED to be removed in v2.14
+	fmt.Println(config.TriggerMetadata)
 	if val, ok := config.TriggerMetadata[msgBacklogMetricName]; ok {
+		logger.V(1).Info("\"msgBacklog\" is deprecated and will be removed in v2.14, please use \"msgBacklogThreshold\" instead")
+		t, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return meta, fmt.Errorf("error parsing %s: %w", msgBacklogMetricName, err)
+		}
+		meta.msgBacklogThreshold = t
+	} else if val, ok := config.TriggerMetadata["msgBacklogThreshold"]; ok {
 		t, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			return meta, fmt.Errorf("error parsing %s: %w", msgBacklogMetricName, err)
 		}
 		meta.msgBacklogThreshold = t
 	}
+	// END FIXME
+
 	// For backwards compatibility, we need to map "tls: enable" to
 	if tls, ok := config.TriggerMetadata["tls"]; ok {
 		if tls == enable && (config.AuthParams["cert"] != "" || config.AuthParams["key"] != "") {
@@ -209,14 +221,17 @@ func (s *pulsarScaler) GetStats(ctx context.Context) (*pulsarStats, error) {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", s.metadata.statsURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error requesting stats from url: %w", err)
+		return nil, fmt.Errorf("error requesting stats from admin url: %w", err)
 	}
 
 	addAuthHeaders(req, &s.metadata)
 
 	res, err := s.client.Do(req)
-	if res == nil || err != nil {
-		return nil, fmt.Errorf("error requesting stats from url: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("error requesting stats from admin url: %w", err)
+	}
+	if res == nil {
+		return nil, fmt.Errorf("error requesting stats from admin url, got empty response")
 	}
 
 	defer res.Body.Close()
@@ -225,7 +240,7 @@ func (s *pulsarScaler) GetStats(ctx context.Context) (*pulsarStats, error) {
 	case 200:
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
-			return nil, fmt.Errorf("error requesting stats from url: %w", err)
+			return nil, fmt.Errorf("error requesting stats from admin url: %w", err)
 		}
 		err = json.Unmarshal(body, stats)
 		if err != nil {
@@ -233,9 +248,9 @@ func (s *pulsarScaler) GetStats(ctx context.Context) (*pulsarStats, error) {
 		}
 		return stats, nil
 	case 404:
-		return nil, fmt.Errorf("error requesting stats from url: %w", err)
+		return nil, fmt.Errorf("error requesting stats from admin url, response status is (404): %s", res.Status)
 	default:
-		return nil, fmt.Errorf("error requesting stats from url: %w", err)
+		return nil, fmt.Errorf("error requesting stats from admin url, response status is: %s", res.Status)
 	}
 }
 

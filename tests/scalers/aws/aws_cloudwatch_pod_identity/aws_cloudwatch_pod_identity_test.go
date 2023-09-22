@@ -71,7 +71,6 @@ spec:
       labels:
         app: {{.DeploymentName}}
     spec:
-      serviceAccountName: default
       containers:
       - name: nginx
         image: nginxinc/nginx-unprivileged
@@ -147,7 +146,7 @@ func TestCloudWatchScaler(t *testing.T) {
 	testScaleIn(t, kc, cloudwatchClient)
 
 	// cleanup
-	DeleteKubernetesResources(t, kc, testNamespace, data, templates)
+	DeleteKubernetesResources(t, testNamespace, data, templates)
 
 	setCloudWatchCustomMetric(t, cloudwatchClient, 0)
 }

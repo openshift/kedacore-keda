@@ -32,6 +32,7 @@ type awsDynamoDBMetadata struct {
 	keyConditionExpression    string
 	expressionAttributeNames  map[string]*string
 	expressionAttributeValues map[string]*dynamodb.AttributeValue
+	indexName                 string
 	targetValue               int64
 	activationTargetValue     int64
 	awsAuthorization          awsAuthorizationMetadata
@@ -104,6 +105,10 @@ func parseAwsDynamoDBMetadata(config *ScalerConfig) (*awsDynamoDBMetadata, error
 
 	if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
 		meta.awsEndpoint = val
+	}
+
+	if val, ok := config.TriggerMetadata["indexName"]; ok {
+		meta.indexName = val
 	}
 
 	if val, ok := config.TriggerMetadata["keyConditionExpression"]; ok && val != "" {
@@ -180,7 +185,7 @@ func createDynamoDBClient(metadata *awsDynamoDBMetadata) *dynamodb.DynamoDB {
 	return dynamodb.New(sess, config)
 }
 
-func (s *awsDynamoDBScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+func (s *awsDynamoDBScaler) GetMetricsAndActivity(_ context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	metricValue, err := s.GetQueryMetrics()
 	if err != nil {
 		s.logger.Error(err, "Error getting metric value")
@@ -216,6 +221,10 @@ func (s *awsDynamoDBScaler) GetQueryMetrics() (float64, error) {
 		KeyConditionExpression:    aws.String(s.metadata.keyConditionExpression),
 		ExpressionAttributeNames:  s.metadata.expressionAttributeNames,
 		ExpressionAttributeValues: s.metadata.expressionAttributeValues,
+	}
+
+	if s.metadata.indexName != "" {
+		dimensions.IndexName = aws.String(s.metadata.indexName)
 	}
 
 	res, err := s.dbClient.Query(&dimensions)
