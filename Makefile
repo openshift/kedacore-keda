@@ -22,7 +22,7 @@ IMAGE_CONTROLLER = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
 IMAGE_ADAPTER    = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
 IMAGE_WEBHOOKS   = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-admission-webhooks$(SUFFIX):$(VERSION)
 
-BUILD_TOOLS_GO_VERSION = 1.19.7
+BUILD_TOOLS_GO_VERSION = 1.20.5
 IMAGE_BUILD_TOOLS = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/build-tools:$(BUILD_TOOLS_GO_VERSION)
 
 ARCH       ?=amd64
@@ -36,7 +36,8 @@ GIT_VERSION ?= $(shell git describe --always --abbrev=7)
 GIT_COMMIT  ?= $(shell git rev-list -1 HEAD)
 DATE        = $(shell date -u +"%Y.%m.%d.%H.%M.%S")
 
-TEST_CLUSTER_NAME ?= keda-nightly-run-3
+TEST_CLUSTER_NAME ?= keda-e2e-cluster-nightly
+NODE_POOL_SIZE ?= 1
 NON_ROOT_USER_ID ?= 1000
 
 GCP_WI_PROVIDER ?= projects/${TF_GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${TEST_CLUSTER_NAME}/providers/${TEST_CLUSTER_NAME}
@@ -51,10 +52,10 @@ endif
 GO_BUILD_VARS= GO111MODULE=on CGO_ENABLED=$(CGO) GOOS=$(TARGET_OS) GOARCH=$(ARCH)
 GO_LDFLAGS="-X=github.com/kedacore/keda/v2/version.GitCommit=$(GIT_COMMIT) -X=github.com/kedacore/keda/v2/version.Version=$(VERSION)"
 
-COSIGN_FLAGS ?= -a GIT_HASH=${GIT_COMMIT} -a GIT_VERSION=${VERSION} -a BUILD_DATE=${DATE}
+COSIGN_FLAGS ?= -y -a GIT_HASH=${GIT_COMMIT} -a GIT_VERSION=${VERSION} -a BUILD_DATE=${DATE}
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.25
+ENVTEST_K8S_VERSION = 1.26
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
@@ -81,23 +82,34 @@ install-test-deps:
 test: manifests generate fmt vet envtest install-test-deps ## Run tests and export the result to junit format.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -v 2>&1 ./... -coverprofile cover.out | go-junit-report -iocopy -set-exit-code -out report.xml
 
-.PHONY: get-cluster-context
-get-cluster-context: ## Get Azure cluster context.
+.PHONY:
+az-login:
 	@az login --service-principal -u $(TF_AZURE_SP_APP_ID) -p "$(AZURE_SP_KEY)" --tenant $(TF_AZURE_SP_TENANT)
+
+.PHONY: get-cluster-context
+get-cluster-context: az-login ## Get Azure cluster context.
 	@az aks get-credentials \
 		--name $(TEST_CLUSTER_NAME) \
 		--subscription $(TF_AZURE_SUBSCRIPTION) \
 		--resource-group $(TF_AZURE_RESOURCE_GROUP)
 
+.PHONY: scale-node-pool
+scale-node-pool: az-login ## Scale nodepool.
+	@az aks scale \
+		--name $(TEST_CLUSTER_NAME) \
+		--subscription $(TF_AZURE_SUBSCRIPTION) \
+		--resource-group $(TF_AZURE_RESOURCE_GROUP) \
+		--node-count $(NODE_POOL_SIZE)
+
 .PHONY: e2e-test
 e2e-test: get-cluster-context ## Run e2e tests against Azure cluster.
 	TERMINFO=/etc/terminfo
 	TERM=linux
-	./tests/run-all.sh
+	go run -tags e2e ./tests/run-all.go
 
 .PHONY: e2e-test-local
 e2e-test-local: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
-	./tests/run-all.sh
+	go run -tags e2e ./tests/run-all.go
 
 .PHONY: e2e-test-clean-crds
 e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
@@ -133,19 +145,11 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
-tooldeps: ## Update tooldeps
-	hack/tooldeps/update.sh
-
-tooldeps-check: ## Check whether tooldeps are out of date
-	rm -rf hack/tooldeps-check
-	cp -a hack/tooldeps hack/tooldeps-check
-	hack/tooldeps-check/update.sh
-	diff -uNr hack/tooldeps hack/tooldeps-check || { echo "tooldeps are out of date. Run 'make tooldeps' to correct"; rm -rf hack/tooldeps-check; false; }
-	rm -rf hack/tooldeps-check
-	echo "tooldeps are current"
-
 golangci: ## Run golangci against code.
 	golangci-lint run
+
+verify-manifests: ## Verify manifests are up to date.
+	./hack/verify-manifests.sh
 
 clientset-verify: ## Verify that generated client-go clientset, listers and informers are up to date.
 	./hack/verify-codegen.sh
@@ -159,7 +163,7 @@ proto-gen: protoc-gen ## Generate Liiklus, ExternalScaler and MetricsService pro
 	PATH="$(LOCALBIN):$(PATH)" protoc -I vendor --proto_path=pkg/metricsservice/api metrics.proto --go_out=pkg/metricsservice/api --go-grpc_out=pkg/metricsservice/api
 
 .PHONY: mockgen-gen
-mockgen-gen: mockgen pkg/mock/mock_scaling/mock_interface.go pkg/mock/mock_scaling/mock_executor/mock_interface.go pkg/mock/mock_scaler/mock_scaler.go pkg/mock/mock_scale/mock_interfaces.go pkg/mock/mock_client/mock_interfaces.go pkg/scalers/liiklus/mocks/mock_liiklus.go
+mockgen-gen: mockgen pkg/mock/mock_scaling/mock_interface.go pkg/mock/mock_scaling/mock_executor/mock_interface.go pkg/mock/mock_scaler/mock_scaler.go pkg/mock/mock_scale/mock_interfaces.go pkg/mock/mock_client/mock_interfaces.go pkg/scalers/liiklus/mocks/mock_liiklus.go pkg/mock/mock_secretlister/mock_interfaces.go
 
 pkg/mock/mock_scaling/mock_interface.go: pkg/scaling/scale_handler.go
 	$(MOCKGEN) -destination=$@ -package=mock_scaling -source=$^
@@ -167,6 +171,9 @@ pkg/mock/mock_scaling/mock_executor/mock_interface.go: pkg/scaling/executor/scal
 	$(MOCKGEN) -destination=$@ -package=mock_executor -source=$^
 pkg/mock/mock_scaler/mock_scaler.go: pkg/scalers/scaler.go
 	$(MOCKGEN) -destination=$@ -package=mock_scalers -source=$^
+pkg/mock/mock_secretlister/mock_interfaces.go: vendor/k8s.io/client-go/listers/core/v1/secret.go
+	mkdir -p pkg/mock/mock_secretlister
+	$(MOCKGEN) k8s.io/client-go/listers/core/v1 SecretLister,SecretNamespaceLister > $@
 pkg/mock/mock_scale/mock_interfaces.go: vendor/k8s.io/client-go/scale/interfaces.go
 	mkdir -p pkg/mock/mock_scale
 	$(MOCKGEN) k8s.io/client-go/scale ScalesGetter,ScaleInterface > $@
@@ -247,17 +254,20 @@ set-version:
 
 ##@ Deployment
 
-install: kustomize manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | kubectl apply -f -
+install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build config/crd | kubectl apply --server-side -f -
 
-uninstall: kustomize manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
+uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | kubectl delete -f -
 
-deploy: kustomize manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: install ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && \
 	$(KUSTOMIZE) edit set image ghcr.io/kedacore/keda=${IMAGE_CONTROLLER} && \
 	if [ "$(AZURE_RUN_AAD_POD_IDENTITY_TESTS)" = true ]; then \
 		$(KUSTOMIZE) edit add label --force aadpodidbinding:keda; \
+	fi && \
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
+		$(KUSTOMIZE) edit add label --force azure.workload.identity/use:true; \
 	fi
 	cd config/metrics-server && \
     $(KUSTOMIZE) edit set image ghcr.io/kedacore/keda-metrics-apiserver=${IMAGE_ADAPTER} && \
@@ -289,6 +299,7 @@ deploy: kustomize manifests kustomize ## Deploy controller to the K8s cluster sp
 
 undeploy: kustomize e2e-test-clean-crds ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/e2e | kubectl delete -f -
+	make uninstall
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin

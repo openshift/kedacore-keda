@@ -34,6 +34,18 @@ jobs:
             **Update:** You can check the progress [here](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})
           reactions: rocket
 
+      - name: Add label to skip e2e test
+        if: ${{ startsWith(github.event.comment.body,'/skip-e2e') && steps.checkUserMember.outputs.isTeamMember == 'true' }}
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ["skip-e2e"]
+            })
+
       - name: Parse git info
         if: ${{ startsWith(github.event.comment.body,'/run-e2e') && steps.checkUserMember.outputs.isTeamMember == 'true' }}
         id: parser
@@ -55,7 +67,7 @@ jobs:
     needs: triage
     runs-on: ubuntu-latest
     name: Build images
-    container: ghcr.io/kedacore/build-tools:1.19.7
+    container: ghcr.io/kedacore/build-tools:1.20.5
     if: needs.triage.outputs.run-e2e == 'true'
     steps:
       - name: Set status in-progress
@@ -98,7 +110,7 @@ jobs:
     needs: [triage, build-test-images]
     runs-on: e2e
     name: Execute e2e tests
-    container: ghcr.io/kedacore/build-tools:1.19.7
+    container: ghcr.io/kedacore/build-tools:1.20.5
     if: needs.triage.outputs.run-e2e == 'true'
     steps:
       - name: Set status in-progress
@@ -126,6 +138,12 @@ jobs:
         with:
           secrets: ${{ toJSON(secrets) }}
 
+      - name: Scale cluster
+        run: make scale-node-pool
+        env:
+          NODE_POOL_SIZE: 4
+          TEST_CLUSTER_NAME: keda-e2e-cluster-pr
+
       - name: Run end to end tests
         continue-on-error: true
         id: test
@@ -135,13 +153,13 @@ jobs:
           AZURE_RUN_WORKLOAD_IDENTITY_TESTS: true
           GCP_RUN_IDENTITY_TESTS: true
           E2E_IMAGE_TAG: ${{ needs.triage.outputs.image_tag }}
-          TEST_CLUSTER_NAME: keda-pr-run
+          TEST_CLUSTER_NAME: keda-e2e-cluster-pr
         run: |
           MESSAGE="${{ github.event.comment.body }}"
           REGEX='/run-e2e (.+)'
           if [[ "$MESSAGE" =~ $REGEX ]]
           then
-            export E2E_TEST_REGEX="${BASH_REMATCH[1]}"
+            export E2E_TEST_REGEX="$(echo ${BASH_REMATCH[1]} | head -1)"
           fi
           echo "${{ needs.triage.outputs.pr_num }}"
           make e2e-test
@@ -150,7 +168,14 @@ jobs:
         if: ${{ always() }}
         run: make e2e-test-clean
         env:
-          TEST_CLUSTER_NAME: keda-pr-run
+          TEST_CLUSTER_NAME: keda-e2e-cluster-pr
+
+      - name: Scale cluster
+        if: ${{ always() }}
+        run: make scale-node-pool
+        env:
+          NODE_POOL_SIZE: 1
+          TEST_CLUSTER_NAME: keda-e2e-cluster-pr
 
       - name: React to comment with success
         uses: dkershner6/reaction-action@v1
@@ -193,3 +218,4 @@ jobs:
         with:
           name: e2e-test-logs
           path: '${{ github.workspace }}/tests/**/*.log'
+          if-no-files-found: ignore

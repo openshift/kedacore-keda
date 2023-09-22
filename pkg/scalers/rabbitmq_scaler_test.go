@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 )
 
 const (
@@ -23,10 +26,12 @@ type parseRabbitMQMetadataTestData struct {
 }
 
 type parseRabbitMQAuthParamTestData struct {
-	metadata   map[string]string
-	authParams map[string]string
-	isError    bool
-	enableTLS  bool
+	metadata         map[string]string
+	podIdentity      v1alpha1.AuthPodIdentity
+	authParams       map[string]string
+	isError          bool
+	enableTLS        bool
+	workloadIdentity bool
 }
 
 type rabbitMQMetricIdentifier struct {
@@ -126,22 +131,30 @@ var testRabbitMQMetadata = []parseRabbitMQMetadataTestData{
 	{map[string]string{"mode": "QueueLength", "value": "1000", "queueName": "sample", "host": "http://", "useRegex": "true", "excludeUnacknowledged": "true"}, false, map[string]string{}},
 	// amqp and excludeUnacknowledged
 	{map[string]string{"mode": "QueueLength", "value": "1000", "queueName": "sample", "host": "amqp://", "useRegex": "true", "excludeUnacknowledged": "true"}, true, map[string]string{}},
+	// unsafeSsl true
+	{map[string]string{"queueName": "sample", "host": "https://", "unsafeSsl": "true"}, false, map[string]string{}},
+	// unsafeSsl wrong input
+	{map[string]string{"queueName": "sample", "host": "https://", "unsafeSsl": "random"}, true, map[string]string{}},
 }
 
 var testRabbitMQAuthParamData = []parseRabbitMQAuthParamTestData{
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, false, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, false, true, false},
 	// success, TLS cert/key and assumed public CA
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "cert": "ceert", "key": "keey"}, false, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "cert": "ceert", "key": "keey"}, false, true, false},
 	// success, TLS cert/key + key password and assumed public CA
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "cert": "ceert", "key": "keey", "keyPassword": "keeyPassword"}, false, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "cert": "ceert", "key": "keey", "keyPassword": "keeyPassword"}, false, true, false},
 	// success, TLS CA only
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "ca": "caaa"}, false, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "ca": "caaa"}, false, true, false},
 	// failure, TLS missing cert
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "ca": "caaa", "key": "kee"}, true, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "ca": "caaa", "key": "kee"}, true, true, false},
 	// failure, TLS missing key
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "enable", "ca": "caaa", "cert": "ceert"}, true, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "enable", "ca": "caaa", "cert": "ceert"}, true, true, false},
 	// failure, TLS invalid
-	{map[string]string{"queueName": "sample", "hostFromEnv": host}, map[string]string{"tls": "yes", "ca": "caaa", "cert": "ceert", "key": "kee"}, true, true},
+	{map[string]string{"queueName": "sample", "hostFromEnv": host}, v1alpha1.AuthPodIdentity{}, map[string]string{"tls": "yes", "ca": "caaa", "cert": "ceert", "key": "kee"}, true, true, false},
+	// success, WorkloadIdentity
+	{map[string]string{"queueName": "sample", "hostFromEnv": host, "protocol": "http"}, v1alpha1.AuthPodIdentity{Provider: v1alpha1.PodIdentityProviderAzureWorkload, IdentityID: "client-id"}, map[string]string{"workloadIdentityResource": "rabbitmq-resource-id"}, false, false, true},
+	// failure, WoekloadIdentity not supported for amqp
+	{map[string]string{"queueName": "sample", "hostFromEnv": host, "protocol": "amqp"}, v1alpha1.AuthPodIdentity{Provider: v1alpha1.PodIdentityProviderAzureWorkload, IdentityID: "client-id"}, map[string]string{"workloadIdentityResource": "rabbitmq-resource-id"}, true, false, false},
 }
 var rabbitMQMetricIdentifiers = []rabbitMQMetricIdentifier{
 	{&testRabbitMQMetadata[1], 0, "s0-rabbitmq-sample"},
@@ -150,20 +163,29 @@ var rabbitMQMetricIdentifiers = []rabbitMQMetricIdentifier{
 }
 
 func TestRabbitMQParseMetadata(t *testing.T) {
-	for _, testData := range testRabbitMQMetadata {
-		_, err := parseRabbitMQMetadata(&ScalerConfig{ResolvedEnv: sampleRabbitMqResolvedEnv, TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
+	for idx, testData := range testRabbitMQMetadata {
+		meta, err := parseRabbitMQMetadata(&ScalerConfig{ResolvedEnv: sampleRabbitMqResolvedEnv, TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
 		}
 		if testData.isError && err == nil {
-			t.Error("Expected error but got success")
+			t.Errorf("Expected error but got success in test case %d", idx)
+		}
+		if val, ok := testData.metadata["unsafeSsl"]; ok && err == nil {
+			boolVal, err := strconv.ParseBool(val)
+			if err != nil && !testData.isError {
+				t.Errorf("Expect error but got success in test case %d", idx)
+			}
+			if boolVal != meta.unsafeSsl {
+				t.Errorf("Expect %t but got %t in test case %d", boolVal, meta.unsafeSsl, idx)
+			}
 		}
 	}
 }
 
-func TestRabbitMQParseAuthParamdata(t *testing.T) {
+func TestRabbitMQParseAuthParamData(t *testing.T) {
 	for _, testData := range testRabbitMQAuthParamData {
-		metadata, err := parseRabbitMQMetadata(&ScalerConfig{ResolvedEnv: sampleRabbitMqResolvedEnv, TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
+		metadata, err := parseRabbitMQMetadata(&ScalerConfig{ResolvedEnv: sampleRabbitMqResolvedEnv, TriggerMetadata: testData.metadata, AuthParams: testData.authParams, PodIdentity: testData.podIdentity})
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
 		}
@@ -186,6 +208,12 @@ func TestRabbitMQParseAuthParamdata(t *testing.T) {
 			if metadata.keyPassword != testData.authParams["keyPassword"] {
 				t.Errorf("Expected key to be set to %v but got %v\n", testData.authParams["keyPassword"], metadata.key)
 			}
+		}
+		if metadata != nil && metadata.workloadIdentityClientID != "" && !testData.workloadIdentity {
+			t.Errorf("Expected workloadIdentity to be disabled but got %v as client ID and %v as resource\n", metadata.workloadIdentityClientID, metadata.workloadIdentityResource)
+		}
+		if metadata != nil && metadata.workloadIdentityClientID == "" && testData.workloadIdentity {
+			t.Error("Expected workloadIdentity to be enabled but was not\n")
 		}
 	}
 }
@@ -251,7 +279,7 @@ var testQueueInfoTestData = []getQueueInfoTestData{
 	{`Password is incorrect`, http.StatusUnauthorized, false, nil, ""},
 }
 
-var vhostPathes = []string{"/myhost", "", "/", "//", rabbitRootVhostPath}
+var vhostPaths = []string{"/myhost", "", "/", "//", rabbitRootVhostPath}
 
 var testQueueInfoTestDataSingleVhost = []getQueueInfoTestData{
 	{`{"messages": 4, "messages_unacknowledged": 1, "message_stats": {"publish_details": {"rate": 1.4}}, "name": "evaluate_trials"}`, http.StatusOK, true, map[string]string{"hostFromEnv": "plainHost", "vhostName": "myhost"}, "/myhost"},
@@ -265,7 +293,7 @@ var testQueueInfoTestDataSingleVhost = []getQueueInfoTestData{
 func TestGetQueueInfo(t *testing.T) {
 	allTestData := []getQueueInfoTestData{}
 	for _, testData := range testQueueInfoTestData {
-		for _, vhostPath := range vhostPathes {
+		for _, vhostPath := range vhostPaths {
 			testData := testData
 			testData.vhostPath = vhostPath
 			allTestData = append(allTestData, testData)
@@ -400,12 +428,12 @@ var testRegexQueueInfoTestData = []getQueueInfoTestData{
 	{`{"items":[]}`, http.StatusOK, false, map[string]string{"mode": "MessageRate", "value": "1000", "useRegex": "true", "operation": "avg"}, ""},
 }
 
-var vhostPathesForRegex = []string{"", "/test-vh", rabbitRootVhostPath}
+var vhostPathsForRegex = []string{"", "/test-vh", rabbitRootVhostPath}
 
 func TestGetQueueInfoWithRegex(t *testing.T) {
 	allTestData := []getQueueInfoTestData{}
 	for _, testData := range testRegexQueueInfoTestData {
-		for _, vhostPath := range vhostPathesForRegex {
+		for _, vhostPath := range vhostPathsForRegex {
 			testData := testData
 			testData.vhostPath = vhostPath
 			allTestData = append(allTestData, testData)
@@ -485,7 +513,7 @@ var testRegexPageSizeTestData = []getRegexPageSizeTestData{
 func TestGetPageSizeWithRegex(t *testing.T) {
 	allTestData := []getRegexPageSizeTestData{}
 	for _, testData := range testRegexPageSizeTestData {
-		for _, vhostPath := range vhostPathesForRegex {
+		for _, vhostPath := range vhostPathsForRegex {
 			testData := testData
 			testData.queueInfo.vhostPath = vhostPath
 			allTestData = append(allTestData, testData)
@@ -568,7 +596,7 @@ type rabbitMQErrorTestData struct {
 	message string
 }
 
-var anonimizeRabbitMQErrorTestData = []rabbitMQErrorTestData{
+var anonymizeRabbitMQErrorTestData = []rabbitMQErrorTestData{
 	{fmt.Errorf("https://user1:password1@domain.com"), "error inspecting rabbitMQ: https://user:password@domain.com"},
 	{fmt.Errorf("https://fdasr345_-:password1@domain.com"), "error inspecting rabbitMQ: https://user:password@domain.com"},
 	{fmt.Errorf("https://user1:fdasr345_-@domain.com"), "error inspecting rabbitMQ: https://user:password@domain.com"},
@@ -580,7 +608,7 @@ var anonimizeRabbitMQErrorTestData = []rabbitMQErrorTestData{
 	{fmt.Errorf("the queue https://user1:fdasr345_-@domain.com/api/virtual is unavailable"), "error inspecting rabbitMQ: the queue https://user:password@domain.com/api/virtual is unavailable"},
 }
 
-func TestRabbitMQAnonimizeRabbitMQError(t *testing.T) {
+func TestRabbitMQAnonymizeRabbitMQError(t *testing.T) {
 	metadata := map[string]string{
 		"queueName":   "evaluate_trials",
 		"hostFromEnv": host,
@@ -596,8 +624,8 @@ func TestRabbitMQAnonimizeRabbitMQError(t *testing.T) {
 		metadata:   meta,
 		httpClient: nil,
 	}
-	for _, testData := range anonimizeRabbitMQErrorTestData {
-		err := s.anonimizeRabbitMQError(testData.err)
+	for _, testData := range anonymizeRabbitMQErrorTestData {
+		err := s.anonymizeRabbitMQError(testData.err)
 		assert.Equal(t, fmt.Sprint(err), testData.message)
 	}
 }

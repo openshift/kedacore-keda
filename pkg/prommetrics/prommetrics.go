@@ -17,11 +17,14 @@ limitations under the License.
 package prommetrics
 
 import (
+	"runtime"
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/kedacore/keda/v2/version"
 )
 
 var log = logf.Log.WithName("prometheus_server")
@@ -36,7 +39,15 @@ const (
 )
 
 var (
-	metricLabels      = []string{"namespace", "metric", "scaledObject", "scaler", "scalerIndex"}
+	metricLabels = []string{"namespace", "metric", "scaledObject", "scaler", "scalerIndex"}
+	buildInfo    = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: DefaultPromMetricsNamespace,
+			Name:      "build_info",
+			Help:      "A metric with a constant '1' value labeled by version, git_commit and goversion from which KEDA was built.",
+		},
+		[]string{"version", "git_commit", "goversion", "goos", "goarch"},
+	)
 	scalerErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: DefaultPromMetricsNamespace,
@@ -109,18 +120,32 @@ var (
 		},
 		[]string{"type", "namespace"},
 	)
+
+	internalLoopLatency = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: DefaultPromMetricsNamespace,
+			Subsystem: "internal_scale_loop",
+			Name:      "latency",
+			Help:      "Internal latency of ScaledObject/ScaledJob loop execution",
+		},
+		[]string{"namespace", "type", "resource"},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(scalerErrorsTotal)
 	metrics.Registry.MustRegister(scalerMetricsValue)
 	metrics.Registry.MustRegister(scalerMetricsLatency)
+	metrics.Registry.MustRegister(internalLoopLatency)
 	metrics.Registry.MustRegister(scalerActive)
 	metrics.Registry.MustRegister(scalerErrors)
 	metrics.Registry.MustRegister(scaledObjectErrors)
 
 	metrics.Registry.MustRegister(triggerTotalsGaugeVec)
 	metrics.Registry.MustRegister(crdTotalsGaugeVec)
+	metrics.Registry.MustRegister(buildInfo)
+
+	RecordBuildInfo()
 }
 
 // RecordScalerMetric create a measurement of the external metric used by the HPA
@@ -131,6 +156,15 @@ func RecordScalerMetric(namespace string, scaledObject string, scaler string, sc
 // RecordScalerLatency create a measurement of the latency to external metric
 func RecordScalerLatency(namespace string, scaledObject string, scaler string, scalerIndex int, metric string, value float64) {
 	scalerMetricsLatency.With(getLabels(namespace, scaledObject, scaler, scalerIndex, metric)).Set(value)
+}
+
+// RecordScaledObjectLatency create a measurement of the latency executing scalable object loop
+func RecordScalableObjectLatency(namespace string, name string, isScaledObject bool, value float64) {
+	resourceType := "scaledjob"
+	if isScaledObject {
+		resourceType = "scaledobject"
+	}
+	internalLoopLatency.WithLabelValues(namespace, resourceType, name).Set(value)
 }
 
 // RecordScalerActive create a measurement of the activity of the scaler
@@ -171,6 +205,11 @@ func RecordScaledObjectError(namespace string, scaledObject string, err error) {
 		log.Error(errscaledobject, "Unable to write to metrics to Prometheus Server: %v")
 		return
 	}
+}
+
+// RecordBuildInfo publishes information about KEDA version and runtime info through an info metric (gauge).
+func RecordBuildInfo() {
+	buildInfo.WithLabelValues(version.Version, version.GitCommit, runtime.Version(), runtime.GOOS, runtime.GOARCH).Set(1)
 }
 
 func getLabels(namespace string, scaledObject string, scaler string, scalerIndex int, metric string) prometheus.Labels {

@@ -36,7 +36,6 @@ import (
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/kedacore/keda/v2/pkg/eventreason"
 	"github.com/kedacore/keda/v2/pkg/fallback"
-	metricsserviceapi "github.com/kedacore/keda/v2/pkg/metricsservice/api"
 	"github.com/kedacore/keda/v2/pkg/prommetrics"
 	"github.com/kedacore/keda/v2/pkg/scalers"
 	"github.com/kedacore/keda/v2/pkg/scaling/cache"
@@ -55,7 +54,7 @@ type ScaleHandler interface {
 	GetScalersCache(ctx context.Context, scalableObject interface{}) (*cache.ScalersCache, error)
 	ClearScalersCache(ctx context.Context, scalableObject interface{}) error
 
-	GetScaledObjectMetrics(ctx context.Context, scaledObjectName, scaledObjectNamespace, metricName string) (*external_metrics.ExternalMetricValueList, *metricsserviceapi.PromMetricsMsg, error)
+	GetScaledObjectMetrics(ctx context.Context, scaledObjectName, scaledObjectNamespace, metricName string) (*external_metrics.ExternalMetricValueList, error)
 }
 
 type scaleHandler struct {
@@ -119,10 +118,10 @@ func (h *scaleHandler) HandleScalableObject(ctx context.Context, scalableObject 
 	switch obj := scalableObject.(type) {
 	case *kedav1alpha1.ScaledObject:
 		go h.startPushScalers(ctx, withTriggers, obj.DeepCopy(), scalingMutex)
-		go h.startScaleLoop(ctx, withTriggers, obj.DeepCopy(), scalingMutex)
+		go h.startScaleLoop(ctx, withTriggers, obj.DeepCopy(), scalingMutex, true)
 	case *kedav1alpha1.ScaledJob:
 		go h.startPushScalers(ctx, withTriggers, obj.DeepCopy(), scalingMutex)
-		go h.startScaleLoop(ctx, withTriggers, obj.DeepCopy(), scalingMutex)
+		go h.startScaleLoop(ctx, withTriggers, obj.DeepCopy(), scalingMutex, false)
 	}
 	return nil
 }
@@ -156,14 +155,23 @@ func (h *scaleHandler) DeleteScalableObject(ctx context.Context, scalableObject 
 }
 
 // startScaleLoop blocks forever and checks the scalableObject based on its pollingInterval
-func (h *scaleHandler) startScaleLoop(ctx context.Context, withTriggers *kedav1alpha1.WithTriggers, scalableObject interface{}, scalingMutex sync.Locker) {
+func (h *scaleHandler) startScaleLoop(ctx context.Context, withTriggers *kedav1alpha1.WithTriggers, scalableObject interface{}, scalingMutex sync.Locker, isScaledObject bool) {
 	logger := log.WithValues("type", withTriggers.Kind, "namespace", withTriggers.Namespace, "name", withTriggers.Name)
 
 	pollingInterval := withTriggers.GetPollingInterval()
 	logger.V(1).Info("Watching with pollingInterval", "PollingInterval", pollingInterval)
 
+	next := time.Now()
+
 	for {
+		// we calculate the next execution time based on the pollingInterval and record the difference
+		// between the expected execution time and the real execution time
+		delay := time.Since(next)
+		prommetrics.RecordScalableObjectLatency(withTriggers.Namespace, withTriggers.Name, isScaledObject, float64(delay.Milliseconds()))
+
 		tmr := time.NewTimer(pollingInterval)
+		next = time.Now().Add(pollingInterval)
+
 		h.checkScalers(ctx, scalableObject, scalingMutex)
 
 		select {
@@ -397,27 +405,17 @@ func (h *scaleHandler) ClearScalersCache(ctx context.Context, scalableObject int
 /// --------------------------------------------------------------------------- ///
 
 // GetScaledObjectMetrics returns metrics for specified metric name for a ScaledObject identified by it's name and namespace.
-// The second return value are Prometheus metrics that needed to be exposed (used by DEPRECATED Prometheus Server on KEDA Metrics Server)
 // It could either query the metric value directly from the scaler or from a cache, that's being stored for the scaler.
-func (h *scaleHandler) GetScaledObjectMetrics(ctx context.Context, scaledObjectName, scaledObjectNamespace, metricName string) (*external_metrics.ExternalMetricValueList, *metricsserviceapi.PromMetricsMsg, error) {
+func (h *scaleHandler) GetScaledObjectMetrics(ctx context.Context, scaledObjectName, scaledObjectNamespace, metricName string) (*external_metrics.ExternalMetricValueList, error) {
 	logger := log.WithValues("scaledObject.Namespace", scaledObjectNamespace, "scaledObject.Name", scaledObjectName)
 
 	var matchingMetrics []external_metrics.ExternalMetricValue
 
-	exportedPromMetrics := metricsserviceapi.PromMetricsMsg{
-		ScaledObjectErr: false,
-		ScalerMetric:    []*metricsserviceapi.ScalerMetricMsg{},
-		ScalerError:     []*metricsserviceapi.ScalerErrorMsg{},
-	}
-
 	cache, err := h.getScalersCacheForScaledObject(ctx, scaledObjectName, scaledObjectNamespace)
 	prommetrics.RecordScaledObjectError(scaledObjectNamespace, scaledObjectName, err)
 
-	// [DEPRECATED] handle exporting Prometheus metrics from Operator to Metrics Server
-	exportedPromMetrics.ScaledObjectErr = (err != nil)
-
 	if err != nil {
-		return nil, &exportedPromMetrics, fmt.Errorf("error getting scalers %w", err)
+		return nil, fmt.Errorf("error getting scalers %w", err)
 	}
 
 	var scaledObject *kedav1alpha1.ScaledObject
@@ -426,7 +424,7 @@ func (h *scaleHandler) GetScaledObjectMetrics(ctx context.Context, scaledObjectN
 	} else {
 		err := fmt.Errorf("scaledObject not found in the cache")
 		logger.Error(err, "scaledObject not found in the cache")
-		return nil, &exportedPromMetrics, err
+		return nil, err
 	}
 
 	isScalerError := false
@@ -487,28 +485,10 @@ func (h *scaleHandler) GetScaledObjectMetrics(ctx context.Context, scaledObjectN
 					for _, metric := range metrics {
 						metricValue := metric.Value.AsApproximateFloat64()
 						prommetrics.RecordScalerMetric(scaledObjectNamespace, scaledObjectName, scalerName, scalerIndex, metric.MetricName, metricValue)
-
-						// [DEPRECATED] handle exporting Prometheus metrics from Operator to Metrics Server
-						scalerMetricMsg := metricsserviceapi.ScalerMetricMsg{
-							ScalerName:  scalerName,
-							ScalerIndex: int32(scalerIndex),
-							MetricName:  metricName,
-							MetricValue: float32(metricValue),
-						}
-						exportedPromMetrics.ScalerMetric = append(exportedPromMetrics.ScalerMetric, &scalerMetricMsg)
 					}
 					matchingMetrics = append(matchingMetrics, metrics...)
 				}
 				prommetrics.RecordScalerError(scaledObjectNamespace, scaledObjectName, scalerName, scalerIndex, metricName, err)
-
-				// [DEPRECATED] handle exporting Prometheus metrics from Operator to Metrics Server
-				scalerErrMsg := metricsserviceapi.ScalerErrorMsg{
-					ScalerName:  scalerName,
-					ScalerIndex: int32(scalerIndex),
-					MetricName:  metricName,
-					Error:       (err != nil),
-				}
-				exportedPromMetrics.ScalerError = append(exportedPromMetrics.ScalerError, &scalerErrMsg)
 			}
 		}
 	}
@@ -524,12 +504,12 @@ func (h *scaleHandler) GetScaledObjectMetrics(ctx context.Context, scaledObjectN
 	}
 
 	if len(matchingMetrics) == 0 {
-		return nil, &exportedPromMetrics, fmt.Errorf("no matching metrics found for " + metricName)
+		return nil, fmt.Errorf("no matching metrics found for " + metricName)
 	}
 
 	return &external_metrics.ExternalMetricValueList{
 		Items: matchingMetrics,
-	}, &exportedPromMetrics, nil
+	}, nil
 }
 
 // getScaledObjectState returns whether the input ScaledObject:
@@ -550,6 +530,17 @@ func (h *scaleHandler) getScaledObjectState(ctx context.Context, scaledObject *k
 		return false, true, map[string]metricscache.MetricsRecord{}, fmt.Errorf("error getting scalers cache %w", err)
 	}
 
+	// count the number of non-external triggers (cpu/mem) in order to check for
+	// scale to zero requirements if atleast one cpu/mem trigger is given.
+	// This is calculated here because of algorithm complexity but
+	// evaluated in the loop below.
+	cpuMemCount := 0
+	for _, trigger := range scaledObject.Spec.Triggers {
+		if trigger.Type == "cpu" || trigger.Type == "memory" {
+			cpuMemCount++
+		}
+	}
+
 	// Let's collect status of all scalers, no matter if any scaler raises error or is active
 	scalers, scalerConfigs := cache.GetScalers()
 	for scalerIndex := 0; scalerIndex < len(scalers); scalerIndex++ {
@@ -566,9 +557,12 @@ func (h *scaleHandler) getScaledObjectState(ctx context.Context, scaledObject *k
 		}
 
 		for _, spec := range metricSpecs {
-			// skip cpu/memory resource scaler, these scalers are also always Active
+			// if cpu/memory resource scaler has minReplicas==0 & at least one external
+			// trigger exists -> object can be scaled to zero
 			if spec.External == nil {
-				isScaledObjectActive = true
+				if len(scaledObject.Spec.Triggers) <= cpuMemCount {
+					isScaledObjectActive = true
+				}
 				continue
 			}
 

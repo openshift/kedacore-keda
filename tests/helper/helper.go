@@ -220,8 +220,8 @@ func GetKedaKubernetesClient(t *testing.T) *v1alpha1.KedaV1alpha1Client {
 
 // Creates a new namespace. If it already exists, make sure it is deleted first.
 func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
-	DeleteNamespace(t, kc, nsName)
-	WaitForNamespaceDeletion(t, kc, nsName)
+	DeleteNamespace(t, nsName)
+	WaitForNamespaceDeletion(t, nsName)
 
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
@@ -235,7 +235,7 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	assert.NoErrorf(t, err, "cannot create kubernetes namespace - %s", err)
 }
 
-func DeleteNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
+func DeleteNamespace(t *testing.T, nsName string) {
 	t.Logf("deleting namespace %s", nsName)
 	period := int64(0)
 	err := KubeClient.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{
@@ -287,8 +287,8 @@ func WaitForAllJobsSuccess(t *testing.T, kc *kubernetes.Clientset, namespace str
 	return false
 }
 
-func WaitForNamespaceDeletion(t *testing.T, kc *kubernetes.Clientset, nsName string) bool {
-	for i := 0; i < 30; i++ {
+func WaitForNamespaceDeletion(t *testing.T, nsName string) bool {
+	for i := 0; i < 120; i++ {
 		t.Logf("waiting for namespace %s deletion", nsName)
 		_, err := KubeClient.CoreV1().Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
 		if err != nil && errors.IsNotFound(err) {
@@ -299,10 +299,22 @@ func WaitForNamespaceDeletion(t *testing.T, kc *kubernetes.Clientset, nsName str
 	return false
 }
 
+func WaitForScaledJobCount(t *testing.T, kc *kubernetes.Clientset, scaledJobName, namespace string,
+	target, iterations, intervalSeconds int) bool {
+	return waitForJobCount(t, kc, fmt.Sprintf("scaledjob.keda.sh/name=%s", scaledJobName), namespace, target, iterations, intervalSeconds)
+}
+
 func WaitForJobCount(t *testing.T, kc *kubernetes.Clientset, namespace string,
 	target, iterations, intervalSeconds int) bool {
+	return waitForJobCount(t, kc, "", namespace, target, iterations, intervalSeconds)
+}
+
+func waitForJobCount(t *testing.T, kc *kubernetes.Clientset, selector, namespace string,
+	target, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
-		jobList, _ := kc.BatchV1().Jobs(namespace).List(context.Background(), metav1.ListOptions{})
+		jobList, _ := kc.BatchV1().Jobs(namespace).List(context.Background(), metav1.ListOptions{
+			LabelSelector: selector,
+		})
 		count := len(jobList.Items)
 
 		t.Logf("Waiting for job count to hit target. Namespace - %s, Current  - %d, Target - %d",
@@ -519,27 +531,6 @@ func KubectlApplyWithTemplate(t *testing.T, data interface{}, templateName strin
 	assert.NoErrorf(t, err, "cannot close temp file - %s", err)
 }
 
-func KubectlCreateWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
-	t.Logf("Applying template: %s", templateName)
-
-	tmpl, err := template.New("kubernetes resource template").Parse(config)
-	assert.NoErrorf(t, err, "cannot parse template - %s", err)
-
-	tempFile, err := os.CreateTemp("", templateName)
-	assert.NoErrorf(t, err, "cannot create temp file - %s", err)
-
-	defer os.Remove(tempFile.Name())
-
-	err = tmpl.Execute(tempFile, data)
-	assert.NoErrorf(t, err, "cannot insert data into template - %s", err)
-
-	_, err = ExecuteCommand(fmt.Sprintf("kubectl create -f %s", tempFile.Name()))
-	assert.NoErrorf(t, err, "cannot apply file - %s", err)
-
-	err = tempFile.Close()
-	assert.NoErrorf(t, err, "cannot close temp file - %s", err)
-}
-
 func KubectlApplyWithErrors(t *testing.T, data interface{}, templateName string, config string) error {
 	t.Logf("Applying template: %s", templateName)
 
@@ -601,10 +592,10 @@ func CreateKubernetesResources(t *testing.T, kc *kubernetes.Clientset, nsName st
 	KubectlApplyMultipleWithTemplate(t, data, templates)
 }
 
-func DeleteKubernetesResources(t *testing.T, kc *kubernetes.Clientset, nsName string, data interface{}, templates []Template) {
+func DeleteKubernetesResources(t *testing.T, nsName string, data interface{}, templates []Template) {
 	KubectlDeleteMultipleWithTemplate(t, data, templates)
-	DeleteNamespace(t, kc, nsName)
-	deleted := WaitForNamespaceDeletion(t, kc, nsName)
+	DeleteNamespace(t, nsName)
+	deleted := WaitForNamespaceDeletion(t, nsName)
 	assert.Truef(t, deleted, "%s namespace not deleted", nsName)
 }
 
@@ -617,20 +608,19 @@ func RemoveANSI(input string) string {
 	return reg.ReplaceAllString(input, "")
 }
 
-func FindPodLogs(t *testing.T, kc *kubernetes.Clientset, namespace, label string) []string {
+func FindPodLogs(kc *kubernetes.Clientset, namespace, label string) ([]string, error) {
 	var podLogs []string
-	t.Logf("Searching for pod logs.........")
 	pods, err := kc.CoreV1().Pods(namespace).List(context.TODO(),
 		metav1.ListOptions{LabelSelector: label})
 	if err != nil {
-		assert.NoErrorf(t, err, "no pod in the list - %s", err)
+		return []string{}, err
 	}
 	var podLogRequest *rest.Request
 	for _, v := range pods.Items {
 		podLogRequest = kc.CoreV1().Pods(namespace).GetLogs(v.Name, &corev1.PodLogOptions{})
 		stream, err := podLogRequest.Stream(context.TODO())
 		if err != nil {
-			assert.NoErrorf(t, err, "cannot open the stream - %s", err)
+			return []string{}, err
 		}
 		defer stream.Close()
 		for {
@@ -643,12 +633,12 @@ func FindPodLogs(t *testing.T, kc *kubernetes.Clientset, namespace, label string
 				continue
 			}
 			if err != nil {
-				assert.NoErrorf(t, err, "cannot read log stream - %s", err)
+				return []string{}, err
 			}
 			podLogs = append(podLogs, string(buf[:numBytes]))
 		}
 	}
-	return podLogs
+	return podLogs, nil
 }
 
 // Delete all pods in namespace by selector

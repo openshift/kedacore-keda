@@ -123,7 +123,7 @@ func buildScaler(ctx context.Context, client client.Client, triggerType string, 
 	case "azure-blob":
 		return scalers.NewAzureBlobScaler(config)
 	case "azure-data-explorer":
-		return scalers.NewAzureDataExplorerScaler(ctx, config)
+		return scalers.NewAzureDataExplorerScaler(config)
 	case "azure-eventhub":
 		return scalers.NewAzureEventHubScaler(ctx, config)
 	case "azure-log-analytics":
@@ -225,6 +225,8 @@ func buildScaler(ctx context.Context, client client.Client, triggerType string, 
 		return scalers.NewSeleniumGridScaler(config)
 	case "solace-event-queue":
 		return scalers.NewSolaceScaler(config)
+	case "solr":
+		return scalers.NewSolrScaler(config)
 	case "stan":
 		return scalers.NewStanScaler(config)
 	default:

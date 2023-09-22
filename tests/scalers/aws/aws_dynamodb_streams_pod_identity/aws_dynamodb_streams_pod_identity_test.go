@@ -79,7 +79,6 @@ spec:
       labels:
         app: {{.DeploymentName}}
     spec:
-      serviceAccountName: default
       containers:
       - name: nginx
         image: nginxinc/nginx-unprivileged
@@ -156,7 +155,7 @@ func TestScaler(t *testing.T) {
 	testScaleIn(t, kc, data, shardCount)
 
 	// cleanup
-	DeleteKubernetesResources(t, kc, testNamespace, data, templates)
+	DeleteKubernetesResources(t, testNamespace, data, templates)
 	cleanupDynamoDBTable(t, dbClient)
 }
 
