@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -232,13 +233,72 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   nsName,
-			Labels: map[string]string{"type": "e2e"},
+			Name: nsName,
+			Labels: map[string]string{"type": "e2e",
+				//TODO(jkyros): I don't like this but some of the stuff we're running doesn't react well to being unprivileged right now.
+				"pod-security.kubernetes.io/enforce": "privileged",
+				"pod-security.kubernetes.io/audit":   "privileged",
+				"pod-security.kubernetes.io/warn":    "privileged",
+			},
 		},
 	}
 
 	_, err := kc.CoreV1().Namespaces().Create(context.Background(), namespace, metav1.CreateOptions{})
 	assert.NoErrorf(t, err, "cannot create kubernetes namespace - %s", err)
+
+	// For openshift, we need to allow the service accounts here to use sccs other than restricted, at least
+	// until we can refactor some of these tests to run under restricted, so this gives the service accounts
+	// in the test namespaces the ability to run privileged/anyuid pods
+	for _, rolebinding := range []*rbacv1.RoleBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "system:openshift:scc:privileged",
+				Namespace: namespace.Name,
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      "default",
+					Namespace: namespace.Name,
+				},
+			},
+			RoleRef: rbacv1.RoleRef{
+				Name: "system:openshift:scc:privileged",
+				Kind: "ClusterRole",
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "system:openshift:scc:anyuid",
+				Namespace: namespace.Name,
+			},
+			Subjects: []rbacv1.Subject{
+				// Most of the manifests in here require privilege in order to bind to
+				// port 80. I think it was mostly done for expedience, I'm sure that
+				// someday we could re-arrange the tests so they can run under 'restricted'
+				{
+					Kind:      "ServiceAccount",
+					Name:      "default",
+					Namespace: namespace.Name,
+				},
+				// The promethus server test runs as its own service account and has a
+				// security context specified that requires anyuid
+				{
+					Kind:      "ServiceAccount",
+					Name:      "prometheus-test-server",
+					Namespace: "prometheus-test-ns",
+				},
+			},
+			RoleRef: rbacv1.RoleRef{
+				Name: "system:openshift:scc:anyuid",
+				Kind: "ClusterRole",
+			},
+		},
+	} {
+		_, err := kc.RbacV1().RoleBindings(namespace.Name).Create(context.Background(), rolebinding, metav1.CreateOptions{})
+		assert.NoError(t, err, "cannot bind service accounts to SCCs")
+	}
+
 }
 
 func DeleteNamespace(t *testing.T, nsName string) {
@@ -543,8 +603,34 @@ type Template struct {
 	Name, Config string
 }
 
+// running this in OpenShift CI is a challenge with pull limits, so we need to replace some images with
+// ones we have cached. This is obviously not ideal, and should be refactored later.
+var imageRewrites = map[string]string{
+	"nginxinc/nginx-unprivileged":             preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
+	"nginxinc/nginx-unprivileged:alpine-slim": preferEnv("quay.io/jkyros/nginx-unprivileged:alpine-slim", "IMG_NGINX_UNPRIVILEGED_SLIM"),
+	"confluentinc/cp-kafka:5.2.1":             preferEnv("quay.io/jkyros/cp-kafka:5.2.1", "IMG_KAFKA"),
+	"nginx:1.14.2":                            preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
+}
+
+// preverEnv returns the env value if populated, otherwise it returns the default string
+// it's used to allow test container images to be overridden by environment variables.
+func preferEnv(defaultValue, env string) string {
+	if val, ok := os.LookupEnv(env); ok {
+		return val
+	}
+	return defaultValue
+}
+
 func KubectlApplyWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
 	t.Logf("Applying template: %s", templateName)
+
+	// If we're on openshift, rewrite the images on the templates to point to smoething we can pull
+	// TODO(jkyros): these should be injectable via env or something so we can use the images
+	// we've already pulled into CI
+	// TODO(jkyros): it is a shame we don't have a "pull interceptor" in CI
+	for old, new := range imageRewrites {
+		config = strings.ReplaceAll(config, old, new)
+	}
 
 	tmpl, err := template.New("kubernetes resource template").Parse(config)
 	assert.NoErrorf(t, err, "cannot parse template - %s", err)
