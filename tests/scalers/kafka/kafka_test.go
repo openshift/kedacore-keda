@@ -488,7 +488,15 @@ spec:
     command:
       - sh
       - -c
-      - "exec tail -f /dev/null"`
+      - "exec tail -f /dev/null"
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault`
 )
 
 func TestScaler(t *testing.T) {
