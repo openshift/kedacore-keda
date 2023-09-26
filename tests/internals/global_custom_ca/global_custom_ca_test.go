@@ -174,6 +174,13 @@ spec:
         image: nginx:1.14.2
         ports:
         - containerPort: 80
+        securityContext:
+          privileged: true
+          runAsNonRoot: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
 `
 
 	scaledObjectTemplate = `
