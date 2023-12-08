@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -455,6 +456,27 @@ func WaitForAllPodRunningInNamespace(t *testing.T, kc *kubernetes.Clientset, nam
 		time.Sleep(time.Duration(intervalSeconds) * time.Second)
 	}
 
+	return false
+}
+
+// Waits until the Horizontal Pod Autoscaler for the scaledObject reports that it has metrics available
+// to calculate or until the number of iterations are done.
+func WaitForHPAMetricsToPopulate(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
+	iterations, intervalSeconds int) bool {
+	totalWaitDuration := time.Duration(iterations) * time.Duration(intervalSeconds) * time.Second
+	startedWaiting := time.Now()
+	for i := 0; i < iterations; i++ {
+		t.Logf("Waiting up to %s for HPA to populate metrics - %s so far", totalWaitDuration, time.Now().Sub(startedWaiting).Round(time.Second))
+
+		hpa, _ := kc.AutoscalingV2().HorizontalPodAutoscalers(namespace).Get(context.Background(), "keda-hpa-cpu-test-so", metav1.GetOptions{})
+		if hpa.Status.CurrentMetrics != nil {
+			j, _ := json.MarshalIndent(hpa.Status.CurrentMetrics, "  ", "    ")
+			t.Logf("HPA has metrics after %s: %s", time.Now().Sub(startedWaiting), j)
+			return true
+		}
+
+		time.Sleep(time.Duration(intervalSeconds) * time.Second)
+	}
 	return false
 }
 

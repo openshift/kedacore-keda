@@ -9,6 +9,8 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"k8s.io/client-go/kubernetes"
 
 	. "github.com/kedacore/keda/v2/tests/helper"
@@ -203,6 +205,15 @@ func TestCpuScaler(t *testing.T) {
 func scaleOut(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 1, 60, 1),
 		"Replica count should start out as 1")
+
+	// The default metrics-server window is 30s, and that's what keda is used to, but on OpenShift we use
+	// prometheus-adapter, and we have it tuned to a window of 5m, so on OpenShift it takes 5 minutes before
+	// the HPA can even start scaling, and we fail the test uniless we wait for the metrics. We'd read the
+	// window straight from the adapter-config configmap in openshift-monitoring, but then the test would be
+	// tied to a specific metrics server implementation, so we just wait up to 10 minutes for the metrics before
+	// we proceed with the test.
+	require.True(t, WaitForHPAMetricsToPopulate(t, kc, deploymentName, testNamespace, 120, 5),
+		"HPA should populate metrics within 10 minutes")
 
 	t.Log("--- testing scale out ---")
 	t.Log("--- applying job ---")
