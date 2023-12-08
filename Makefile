@@ -120,6 +120,28 @@ e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
 e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e2e
 	kubectl delete ns -l type=e2e
 
+# The OpenShift tests are split into 3 targets because when we test the CMA operator, 
+# we want to do the setup and cleanup with the operator, but still run the test suite
+# from the test image, so we need that granularity. 
+.PHONY: e2e-test-openshift-setup
+e2e-test-openshift-setup: ## Setup the tests for OpenShift
+	@echo "--- Performing Setup ---"
+	cd tests; go test -v -timeout 15m -tags e2e ./utils/setup_test.go 
+
+.PHONY: e2e-test-openshift
+e2e-test-openshift: ## Run tests for OpenShift
+	@echo "--- Running Internal Tests ---"
+	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca)
+	@echo "--- Running Scaler Tests ---"
+	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/...
+	@echo "--- Running Sequential Tests ---"
+	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./sequential/...
+
+.PHONY: e2e-test-openshift-clean
+e2e-test-openshift-clean: ## Cleanup the test environment for OpenShift
+	@echo "--- Cleaning Up ---"
+	cd tests; go test -v -timeout 60m -tags e2e ./utils/cleanup_test.go
+
 .PHONY: smoke-test
 smoke-test: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
 	./tests/run-smoke-tests.sh
