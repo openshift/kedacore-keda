@@ -1,0 +1,14 @@
+ # This dockerfile is intended to build something approximating the upstream test
+ # image, but for use in OpenShift CI. Upstream keda bumps the keda-tools image version
+ # when they feel like it, so we might just need to pay attention when we do releases.
+ FROM ghcr.io/kedacore/keda-tools:1.23.8
+ COPY . /src
+ RUN chmod 777 -R /src
+ WORKDIR /src
+ RUN mkdir -p /go && chmod 777 -R /go
+ RUN mkdir -p /bin && chmod 777 -R /bin
+ ENV GOCACHE=/src/.cache
+ ENV USE_SUDO=false
+ ENV PATH=/src/helm:/src/:$PATH
+ ENV HELM_INSTALL_DIR=/src
+ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh
