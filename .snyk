@@ -1,0 +1,5 @@
+exclude:
+  global:
+    - "vendor/**"
+    - "**/*_test.go"
+    - "tests/**"  # contains test code that does not end in _test.go
