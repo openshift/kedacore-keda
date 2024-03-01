@@ -18,12 +18,9 @@ endif
 IMAGE_REGISTRY ?= ghcr.io
 IMAGE_REPO     ?= kedacore
 
-IMAGE_CONTROLLER ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
-IMAGE_ADAPTER    ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
-IMAGE_WEBHOOKS   ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-admission-webhooks$(SUFFIX):$(VERSION)
-
-BUILD_TOOLS_GO_VERSION = 1.20.5
-IMAGE_BUILD_TOOLS = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/build-tools:$(BUILD_TOOLS_GO_VERSION)
+IMAGE_CONTROLLER = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
+IMAGE_ADAPTER    = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
+IMAGE_WEBHOOKS   = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-admission-webhooks$(SUFFIX):$(VERSION)
 
 ARCH       ?=amd64
 CGO        ?=0
@@ -55,7 +52,7 @@ GO_LDFLAGS="-X=github.com/kedacore/keda/v2/version.GitCommit=$(GIT_COMMIT) -X=gi
 COSIGN_FLAGS ?= -y -a GIT_HASH=${GIT_COMMIT} -a GIT_VERSION=${VERSION} -a BUILD_DATE=${DATE}
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.26
+ENVTEST_K8S_VERSION = 1.28
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
@@ -119,28 +116,6 @@ e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
 e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e2e
 	kubectl delete ns -l type=e2e
 
-# The OpenShift tests are split into 3 targets because when we test the CMA operator, 
-# we want to do the setup and cleanup with the operator, but still run the test suite
-# from the test image, so we need that granularity. 
-.PHONY: e2e-test-openshift-setup
-e2e-test-openshift-setup: ## Setup the tests for OpenShift
-	@echo "--- Performing Setup ---"
-	cd tests; go test -v -timeout 15m -tags e2e ./utils/setup_test.go 
-
-.PHONY: e2e-test-openshift
-e2e-test-openshift: ## Run tests for OpenShift
-	@echo "--- Running Internal Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca)
-	@echo "--- Running Scaler Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/...
-	@echo "--- Running Sequential Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./sequential/...
-
-.PHONY: e2e-test-openshift-clean
-e2e-test-openshift-clean: ## Cleanup the test environment for OpenShift
-	@echo "--- Cleaning Up ---"
-	cd tests; go test -v -timeout 60m -tags e2e ./utils/cleanup_test.go
-
 .PHONY: smoke-test
 smoke-test: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
 	./tests/run-smoke-tests.sh
@@ -166,17 +141,6 @@ fmt: ## Run go fmt against code.
 
 vet: ## Run go vet against code.
 	go vet ./...
-
-tooldeps: ## Update tooldeps
-	hack/tooldeps/update.sh
-
-tooldeps-check: ## Check whether tooldeps are out of date
-	rm -rf hack/tooldeps-check
-	cp -a hack/tooldeps hack/tooldeps-check
-	hack/tooldeps-check/update.sh
-	diff -uNr hack/tooldeps hack/tooldeps-check || { echo "tooldeps are out of date. Run 'make tooldeps' to correct"; rm -rf hack/tooldeps-check; false; }
-	rm -rf hack/tooldeps-check
-	echo "tooldeps are current"
 
 golangci: ## Run golangci against code.
 	golangci-lint run
@@ -270,6 +234,7 @@ release: manifests kustomize set-version ## Produce new KEDA release in keda-$(V
 	rm -rf config/default/kustomize-config/metadataLabelTransformer.yaml.out
 	$(KUSTOMIZE) build config/default > keda-$(VERSION).yaml
 	$(KUSTOMIZE) build config/minimal > keda-$(VERSION)-core.yaml
+	$(KUSTOMIZE) build config/crd     > keda-$(VERSION)-crds.yaml
 
 sign-images: ## Sign KEDA images published on GitHub Container Registry
 	COSIGN_EXPERIMENTAL=1 cosign sign ${COSIGN_FLAGS} $(IMAGE_CONTROLLER)
@@ -318,7 +283,7 @@ deploy: install ## Deploy controller to the K8s cluster specified in ~/.kube/con
 	fi
 	if [ "$(GCP_RUN_IDENTITY_TESTS)" = true ]; then \
 		cd config/service_account && \
-		$(KUSTOMIZE) edit add annotation --force cloud.google.com/workload-identity-provider:${GCP_WI_PROVIDER} cloud.google.com/service-account-email:${TF_GCP_SA_EMAIL} cloud.google.com/gcloud-run-as-user:${NON_ROOT_USER_ID}; \
+		$(KUSTOMIZE) edit add annotation --force cloud.google.com/workload-identity-provider:${GCP_WI_PROVIDER} cloud.google.com/service-account-email:${TF_GCP_SA_EMAIL} cloud.google.com/gcloud-run-as-user:${NON_ROOT_USER_ID} cloud.google.com/injection-mode:direct; \
 	fi
 
 	cd config/webhooks && \
@@ -355,7 +320,7 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Install kustomize from vendor dir if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
-	test -s $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v4
+	test -s $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Install envtest-setup from vendor dir if necessary.
@@ -395,14 +360,10 @@ $(PROTOCGEN_GRPC): $(LOCALBIN)
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-.PHONY: docker-build-tools
-docker-build-tools: ## Build build-tools image
-	docker build -f tools/build-tools.Dockerfile -t $(IMAGE_BUILD_TOOLS) --build-arg GO_VERSION=$(BUILD_TOOLS_GO_VERSION) .
-
-.PHONY: publish-build-tools
-publish-build-tools: ## Build and push multi-arch Docker image for build-tools.
-	docker buildx build --push --platform=${BUILD_PLATFORMS} -f tools/build-tools.Dockerfile -t ${IMAGE_BUILD_TOOLS} --build-arg GO_VERSION=$(BUILD_TOOLS_GO_VERSION) .
-
 .PHONY: docker-build-dev-containers
 docker-build-dev-containers: ## Build dev-containers image
 	docker build -f .devcontainer/Dockerfile .
+
+.PHONY: validate-changelog
+validate-changelog: ## Validate changelog
+	./hack/validate-changelog.sh

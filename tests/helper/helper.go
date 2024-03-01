@@ -10,7 +10,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -30,7 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -47,6 +45,7 @@ const (
 	AzureWorkloadIdentityNamespace = "azure-workload-identity-system"
 	AwsIdentityNamespace           = "aws-identity-system"
 	GcpIdentityNamespace           = "gcp-identity-system"
+	OpentelemetryNamespace         = "open-telemetry-system"
 	CertManagerNamespace           = "cert-manager"
 	KEDANamespace                  = "keda"
 	KEDAOperator                   = "keda-operator"
@@ -57,6 +56,10 @@ const (
 
 	StringFalse = "false"
 	StringTrue  = "true"
+
+	StrimziVersion   = "0.35.0"
+	StrimziChartName = "strimzi"
+	StrimziNamespace = "strimzi"
 )
 
 const (
@@ -228,72 +231,13 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-			Labels: map[string]string{"type": "e2e",
-				//TODO(jkyros): I don't like this but some of the stuff we're running doesn't react well to being unprivileged right now.
-				"pod-security.kubernetes.io/enforce": "privileged",
-				"pod-security.kubernetes.io/audit":   "privileged",
-				"pod-security.kubernetes.io/warn":    "privileged",
-			},
+			Name:   nsName,
+			Labels: map[string]string{"type": "e2e"},
 		},
 	}
 
 	_, err := kc.CoreV1().Namespaces().Create(context.Background(), namespace, metav1.CreateOptions{})
 	assert.NoErrorf(t, err, "cannot create kubernetes namespace - %s", err)
-
-	// For openshift, we need to allow the service accounts here to use sccs other than restricted, at least
-	// until we can refactor some of these tests to run under restricted, so this gives the service accounts
-	// in the test namespaces the ability to run privileged/anyuid pods
-	for _, rolebinding := range []*rbacv1.RoleBinding{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:privileged",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:privileged",
-				Kind: "ClusterRole",
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:anyuid",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				// Most of the manifests in here require privilege in order to bind to
-				// port 80. I think it was mostly done for expedience, I'm sure that
-				// someday we could re-arrange the tests so they can run under 'restricted'
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-				// The promethus server test runs as its own service account and has a
-				// security context specified that requires anyuid
-				{
-					Kind:      "ServiceAccount",
-					Name:      "prometheus-test-server",
-					Namespace: "prometheus-test-ns",
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:anyuid",
-				Kind: "ClusterRole",
-			},
-		},
-	} {
-		_, err := kc.RbacV1().RoleBindings(namespace.Name).Create(context.Background(), rolebinding, metav1.CreateOptions{})
-		assert.NoError(t, err, "cannot bind service accounts to SCCs")
-	}
-
 }
 
 func DeleteNamespace(t *testing.T, nsName string) {
@@ -459,33 +403,6 @@ func WaitForAllPodRunningInNamespace(t *testing.T, kc *kubernetes.Clientset, nam
 	return false
 }
 
-// Waits until the Horizontal Pod Autoscaler for the scaledObject reports that it has metrics available
-// to calculate, or until the number of iterations are done, whichever happens first.
-func WaitForHPAMetricsToPopulate(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
-	iterations, intervalSeconds int) bool {
-	totalWaitDuration := time.Duration(iterations) * time.Duration(intervalSeconds) * time.Second
-	startedWaiting := time.Now()
-	for i := 0; i < iterations; i++ {
-		t.Logf("Waiting up to %s for HPA to populate metrics - %s so far", totalWaitDuration, time.Since(startedWaiting).Round(time.Second))
-
-		hpa, _ := kc.AutoscalingV2().HorizontalPodAutoscalers(namespace).Get(context.Background(), name, metav1.GetOptions{})
-		if hpa.Status.CurrentMetrics != nil {
-			for _, currentMetric := range hpa.Status.CurrentMetrics {
-				// When testing on a kind cluster at least, an empty metricStatus object with a blank type shows up first,
-				// so we need to make sure we have *actual* resource metrics before we return
-				if currentMetric.Type != "" {
-					j, _ := json.MarshalIndent(hpa.Status.CurrentMetrics, "  ", "    ")
-					t.Logf("HPA has metrics after %s: %s", time.Since(startedWaiting), j)
-					return true
-				}
-			}
-		}
-
-		time.Sleep(time.Duration(intervalSeconds) * time.Second)
-	}
-	return false
-}
-
 // Waits until deployment ready replica count hits target or number of iterations are done.
 func WaitForDeploymentReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
 	target, iterations, intervalSeconds int) bool {
@@ -598,34 +515,8 @@ type Template struct {
 	Name, Config string
 }
 
-// running this in OpenShift CI is a challenge with pull limits, so we need to replace some images with
-// ones we have cached. This is obviously not ideal, and should be refactored later.
-var imageRewrites = map[string]string{
-	"nginxinc/nginx-unprivileged":             preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-	"nginxinc/nginx-unprivileged:alpine-slim": preferEnv("quay.io/jkyros/nginx-unprivileged:alpine-slim", "IMG_NGINX_UNPRIVILEGED_SLIM"),
-	"confluentinc/cp-kafka:5.2.1":             preferEnv("quay.io/jkyros/cp-kafka:5.2.1", "IMG_KAFKA"),
-	"nginx:1.14.2":                            preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-}
-
-// preverEnv returns the env value if populated, otherwise it returns the default string
-// it's used to allow test container images to be overridden by environment variables.
-func preferEnv(defaultValue, env string) string {
-	if val, ok := os.LookupEnv(env); ok {
-		return val
-	}
-	return defaultValue
-}
-
 func KubectlApplyWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
 	t.Logf("Applying template: %s", templateName)
-
-	// If we're on openshift, rewrite the images on the templates to point to smoething we can pull
-	// TODO(jkyros): these should be injectable via env or something so we can use the images
-	// we've already pulled into CI
-	// TODO(jkyros): it is a shame we don't have a "pull interceptor" in CI
-	for old, new := range imageRewrites {
-		config = strings.ReplaceAll(config, old, new)
-	}
 
 	tmpl, err := template.New("kubernetes resource template").Parse(config)
 	assert.NoErrorf(t, err, "cannot parse template - %s", err)
@@ -909,4 +800,16 @@ func generateCA(t *testing.T) {
 	if err := keyFile.Close(); err != nil {
 		require.NoErrorf(t, err, "error closing custom CA key file- %s", err)
 	}
+}
+
+// CheckKubectlGetResult runs `kubectl get` with parameters and compares output with expected value
+func CheckKubectlGetResult(t *testing.T, kind string, name string, namespace string, otherparameter string, expected string) {
+	time.Sleep(1 * time.Second) // wait a second for recource deployment finished
+	kctlGetCmd := fmt.Sprintf(`kubectl get %s/%s -n %s %s"`, kind, name, namespace, otherparameter)
+	t.Log("Running kubectl cmd:", kctlGetCmd)
+	output, err := ExecuteCommand(kctlGetCmd)
+	assert.NoErrorf(t, err, "cannot get rollout info - %s", err)
+
+	unqoutedOutput := strings.ReplaceAll(string(output), "\"", "")
+	assert.Equal(t, expected, unqoutedOutput)
 }
