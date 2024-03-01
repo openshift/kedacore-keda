@@ -44,7 +44,7 @@ require (
 	github.com/go-playground/validator/v10 v10.15.4
 	github.com/go-sql-driver/mysql v1.7.1
 	github.com/gobwas/glob v0.2.3
-	github.com/gocql/gocql v0.0.0-20211222173705-d73e6b1002a7
+	github.com/gocql/gocql v1.6.0
 	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.6.0
 	github.com/google/go-github/v50 v50.2.0
