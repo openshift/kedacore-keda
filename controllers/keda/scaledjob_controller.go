@@ -41,9 +41,9 @@ import (
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	kedacontrollerutil "github.com/kedacore/keda/v2/controllers/keda/util"
 	"github.com/kedacore/keda/v2/pkg/eventreason"
-	"github.com/kedacore/keda/v2/pkg/prommetrics"
+	"github.com/kedacore/keda/v2/pkg/metricscollector"
 	"github.com/kedacore/keda/v2/pkg/scaling"
-	kedautil "github.com/kedacore/keda/v2/pkg/util"
+	kedastatus "github.com/kedacore/keda/v2/pkg/status"
 )
 
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledjobs;scaledjobs/finalizers;scaledjobs/status,verbs="*"
@@ -129,16 +129,18 @@ func (r *ScaledJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// ensure Status Conditions are initialized
 	if !scaledJob.Status.Conditions.AreInitialized() {
 		conditions := kedav1alpha1.GetInitializedConditions()
-		if err := kedautil.SetStatusConditions(ctx, r.Client, reqLogger, scaledJob, conditions); err != nil {
+		if err := kedastatus.SetStatusConditions(ctx, r.Client, reqLogger, scaledJob, conditions); err != nil {
+			r.Recorder.Event(scaledJob, corev1.EventTypeWarning, eventreason.ScaledJobUpdateFailed, err.Error())
 			return ctrl.Result{}, err
 		}
 	}
 
 	// Check jobTargetRef is specified
 	if scaledJob.Spec.JobTargetRef == nil {
-		errMsg := "scaledJob.spec.jobTargetRef is not set"
+		errMsg := "ScaledJob.spec.jobTargetRef not found"
 		err := fmt.Errorf(errMsg)
-		reqLogger.Error(err, "scaledJob.spec.jobTargetRef not found")
+		reqLogger.Error(err, errMsg)
+		r.Recorder.Event(scaledJob, corev1.EventTypeWarning, eventreason.ScaledJobCheckFailed, errMsg)
 		return ctrl.Result{}, err
 	}
 	conditions := scaledJob.Status.Conditions.DeepCopy()
@@ -157,9 +159,15 @@ func (r *ScaledJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		conditions.SetReadyCondition(metav1.ConditionTrue, "ScaledJobReady", msg)
 	}
 
-	if err := kedautil.SetStatusConditions(ctx, r.Client, reqLogger, scaledJob, &conditions); err != nil {
+	if err := kedastatus.SetStatusConditions(ctx, r.Client, reqLogger, scaledJob, &conditions); err != nil {
+		r.Recorder.Event(scaledJob, corev1.EventTypeWarning, eventreason.ScaledJobUpdateFailed, err.Error())
 		return ctrl.Result{}, err
 	}
+
+	if _, err := r.updateTriggerAuthenticationStatus(ctx, reqLogger, scaledJob); err != nil {
+		reqLogger.Error(err, "Error updating TriggerAuthentication Status")
+	}
+
 	return ctrl.Result{}, err
 }
 
@@ -208,7 +216,7 @@ func (r *ScaledJobReconciler) reconcileScaledJob(ctx context.Context, logger log
 
 // checkIfPaused checks the presence of "autoscaling.keda.sh/paused" annotation on the scaledJob and stop the scale loop.
 func (r *ScaledJobReconciler) checkIfPaused(ctx context.Context, logger logr.Logger, scaledJob *kedav1alpha1.ScaledJob, conditions *kedav1alpha1.Conditions) (bool, error) {
-	_, pausedAnnotation := scaledJob.GetAnnotations()[kedacontrollerutil.PausedAnnotation]
+	_, pausedAnnotation := scaledJob.GetAnnotations()[kedav1alpha1.PausedAnnotation]
 	pausedStatus := conditions.GetPausedCondition().Status == metav1.ConditionTrue
 	if pausedAnnotation {
 		if !pausedStatus {
@@ -319,18 +327,18 @@ func (r *ScaledJobReconciler) updatePromMetrics(scaledJob *kedav1alpha1.ScaledJo
 	metricsData, ok := scaledJobPromMetricsMap[namespacedName]
 
 	if ok {
-		prommetrics.DecrementCRDTotal(prommetrics.ScaledJobResource, metricsData.namespace)
+		metricscollector.DecrementCRDTotal(metricscollector.ScaledJobResource, metricsData.namespace)
 		for _, triggerType := range metricsData.triggerTypes {
-			prommetrics.DecrementTriggerTotal(triggerType)
+			metricscollector.DecrementTriggerTotal(triggerType)
 		}
 	}
 
-	prommetrics.IncrementCRDTotal(prommetrics.ScaledJobResource, scaledJob.Namespace)
+	metricscollector.IncrementCRDTotal(metricscollector.ScaledJobResource, scaledJob.Namespace)
 	metricsData.namespace = scaledJob.Namespace
 
 	triggerTypes := make([]string, len(scaledJob.Spec.Triggers))
 	for _, trigger := range scaledJob.Spec.Triggers {
-		prommetrics.IncrementTriggerTotal(trigger.Type)
+		metricscollector.IncrementTriggerTotal(trigger.Type)
 		triggerTypes = append(triggerTypes, trigger.Type)
 	}
 	metricsData.triggerTypes = triggerTypes
@@ -343,11 +351,25 @@ func (r *ScaledJobReconciler) updatePromMetricsOnDelete(namespacedName string) {
 	defer scaledJobPromMetricsLock.Unlock()
 
 	if metricsData, ok := scaledJobPromMetricsMap[namespacedName]; ok {
-		prommetrics.DecrementCRDTotal(prommetrics.ScaledJobResource, metricsData.namespace)
+		metricscollector.DecrementCRDTotal(metricscollector.ScaledJobResource, metricsData.namespace)
 		for _, triggerType := range metricsData.triggerTypes {
-			prommetrics.DecrementTriggerTotal(triggerType)
+			metricscollector.DecrementTriggerTotal(triggerType)
 		}
 	}
 
 	delete(scaledJobPromMetricsMap, namespacedName)
+}
+
+func (r *ScaledJobReconciler) updateTriggerAuthenticationStatus(ctx context.Context, logger logr.Logger, scaledJob *kedav1alpha1.ScaledJob) (string, error) {
+	return kedastatus.UpdateTriggerAuthenticationStatusFromTriggers(ctx, logger, r.Client, scaledJob.GetNamespace(), scaledJob.Spec.Triggers, func(triggerAuthenticationStatus *kedav1alpha1.TriggerAuthenticationStatus) *kedav1alpha1.TriggerAuthenticationStatus {
+		triggerAuthenticationStatus.ScaledJobNamesStr = kedacontrollerutil.AppendIntoString(triggerAuthenticationStatus.ScaledJobNamesStr, scaledJob.GetName(), ",")
+		return triggerAuthenticationStatus
+	})
+}
+
+func (r *ScaledJobReconciler) updateTriggerAuthenticationStatusOnDelete(ctx context.Context, logger logr.Logger, scaledJob *kedav1alpha1.ScaledJob) (string, error) {
+	return kedastatus.UpdateTriggerAuthenticationStatusFromTriggers(ctx, logger, r.Client, scaledJob.GetNamespace(), scaledJob.Spec.Triggers, func(triggerAuthenticationStatus *kedav1alpha1.TriggerAuthenticationStatus) *kedav1alpha1.TriggerAuthenticationStatus {
+		triggerAuthenticationStatus.ScaledJobNamesStr = kedacontrollerutil.RemoveFromString(triggerAuthenticationStatus.ScaledJobNamesStr, scaledJob.GetName(), ",")
+		return triggerAuthenticationStatus
+	})
 }

@@ -47,6 +47,7 @@ const (
 	AzureWorkloadIdentityNamespace = "azure-workload-identity-system"
 	AwsIdentityNamespace           = "aws-identity-system"
 	GcpIdentityNamespace           = "gcp-identity-system"
+	OpentelemetryNamespace         = "open-telemetry-system"
 	CertManagerNamespace           = "cert-manager"
 	KEDANamespace                  = "keda"
 	KEDAOperator                   = "keda-operator"
@@ -57,6 +58,10 @@ const (
 
 	StringFalse = "false"
 	StringTrue  = "true"
+
+	StrimziVersion   = "0.35.0"
+	StrimziChartName = "strimzi"
+	StrimziNamespace = "strimzi"
 )
 
 const (
@@ -77,6 +82,7 @@ var (
 	AzureRunWorkloadIdentityTests = os.Getenv("AZURE_RUN_WORKLOAD_IDENTITY_TESTS")
 	AwsIdentityTests              = os.Getenv("AWS_RUN_IDENTITY_TESTS")
 	GcpIdentityTests              = os.Getenv("GCP_RUN_IDENTITY_TESTS")
+	EnableOpentelemetry           = os.Getenv("ENABLE_OPENTELEMETRY")
 	InstallCertManager            = AwsIdentityTests == StringTrue || GcpIdentityTests == StringTrue
 )
 
@@ -909,4 +915,16 @@ func generateCA(t *testing.T) {
 	if err := keyFile.Close(); err != nil {
 		require.NoErrorf(t, err, "error closing custom CA key file- %s", err)
 	}
+}
+
+// CheckKubectlGetResult runs `kubectl get` with parameters and compares output with expected value
+func CheckKubectlGetResult(t *testing.T, kind string, name string, namespace string, otherparameter string, expected string) {
+	time.Sleep(1 * time.Second) // wait a second for recource deployment finished
+	kctlGetCmd := fmt.Sprintf(`kubectl get %s/%s -n %s %s"`, kind, name, namespace, otherparameter)
+	t.Log("Running kubectl cmd:", kctlGetCmd)
+	output, err := ExecuteCommand(kctlGetCmd)
+	assert.NoErrorf(t, err, "cannot get rollout info - %s", err)
+
+	unqoutedOutput := strings.ReplaceAll(string(output), "\"", "")
+	assert.Equal(t, expected, unqoutedOutput)
 }
