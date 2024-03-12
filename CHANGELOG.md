@@ -199,6 +199,7 @@ New deprecation(s):
 
 ### Other
 
+- **General**: Allow E2E tests to be run against existing KEDA and/or Kafka installation ([#5595](https://github.com/kedacore/keda/pull/5595))
 - **General**: Introduce ENABLE_OPENTELEMETRY in deploying/testing process  ([#5375](https://github.com/kedacore/keda/issues/5375))
 
 ## v2.12.0
