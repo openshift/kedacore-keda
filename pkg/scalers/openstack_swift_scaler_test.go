@@ -113,7 +113,7 @@ func TestOpenstackSwiftGetMetricSpecForScaling(t *testing.T) {
 			t.Fatal("Could not parse auth metadata:", err)
 		}
 
-		mockSwiftScaler := openstackSwiftScaler{"", meta, openstack.Client{}, logr.Discard()}
+		mockSwiftScaler := openstackSwiftScaler{"", meta, &openstack.Client{}, logr.Discard()}
 
 		metricSpec := mockSwiftScaler.GetMetricSpecForScaling(context.Background())
 

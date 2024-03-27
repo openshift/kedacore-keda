@@ -54,7 +54,7 @@ type openstackSwiftAuthenticationMetadata struct {
 type openstackSwiftScaler struct {
 	metricType  v2.MetricTargetType
 	metadata    *openstackSwiftMetadata
-	swiftClient openstack.Client
+	swiftClient *openstack.Client
 	logger      logr.Logger
 }
 
@@ -241,7 +241,7 @@ func NewOpenstackSwiftScaler(ctx context.Context, config *ScalerConfig) (Scaler,
 	return &openstackSwiftScaler{
 		metricType:  metricType,
 		metadata:    openstackSwiftMetadata,
-		swiftClient: swiftClient,
+		swiftClient: &swiftClient,
 		logger:      logger,
 	}, nil
 }
@@ -369,6 +369,9 @@ func parseOpenstackSwiftAuthenticationMetadata(config *ScalerConfig) (*openstack
 }
 
 func (s *openstackSwiftScaler) Close(context.Context) error {
+	if s.swiftClient != nil {
+		s.swiftClient.HTTPClient.CloseIdleConnections()
+	}
 	return nil
 }
 

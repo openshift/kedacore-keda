@@ -239,6 +239,9 @@ func parseAuthConfig(config *ScalerConfig, meta *prometheusMetadata) error {
 }
 
 func (s *prometheusScaler) Close(context.Context) error {
+	if s.httpClient != nil {
+		s.httpClient.CloseIdleConnections()
+	}
 	return nil
 }
 
