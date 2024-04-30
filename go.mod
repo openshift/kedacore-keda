@@ -52,7 +52,7 @@ require (
 	github.com/gophercloud/gophercloud v1.6.0
 	github.com/hashicorp/vault/api v1.10.0
 	github.com/influxdata/influxdb-client-go/v2 v2.12.3
-	github.com/jackc/pgx/v5 v5.4.3
+	github.com/jackc/pgx/v5 v5.5.5
 	github.com/joho/godotenv v1.5.1
 	github.com/microsoft/ApplicationInsights-Go v0.4.4
 	github.com/microsoft/azure-devops-go-api/azuredevops v1.0.0-b5
@@ -88,7 +88,7 @@ require (
 	google.golang.org/api v0.142.0
 	google.golang.org/grpc v1.59.0
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.3.0
-	google.golang.org/protobuf v1.31.0
+	google.golang.org/protobuf v1.33.0
 	k8s.io/api v0.28.2
 	k8s.io/apimachinery v0.28.2
 	k8s.io/apiserver v0.28.2
@@ -107,6 +107,8 @@ require (
 	sigs.k8s.io/kustomize/kustomize/v5 v5.1.1
 )
 
+require github.com/jackc/puddle/v2 v2.2.1 // indirect
+
 replace (
 	// we need a version with license
 	github.com/chzyer/logex => github.com/chzyer/logex v1.2.1
@@ -118,7 +120,7 @@ replace (
 	golang.org/x/crypto => golang.org/x/crypto v0.0.0-20220829220503-c86fa9a7ed90
 
 	// Needed for CVE-2023-39325 https://nvd.nist.gov/vuln/detail/CVE-2023-39325
-	golang.org/x/net => golang.org/x/net v0.17.0
+	golang.org/x/net => golang.org/x/net v0.24.0
 
 	// https://nvd.nist.gov/vuln/detail/CVE-2022-32149
 	golang.org/x/text => golang.org/x/text v0.13.0
@@ -306,12 +308,12 @@ require (
 	go.uber.org/automaxprocs v1.5.3
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
-	golang.org/x/crypto v0.19.0 // indirect
+	golang.org/x/crypto v0.22.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/mod v0.12.0 // indirect
-	golang.org/x/net v0.18.0 // indirect
-	golang.org/x/sys v0.14.0 // indirect
-	golang.org/x/term v0.13.0 // indirect
+	golang.org/x/net v0.24.0 // indirect
+	golang.org/x/sys v0.19.0 // indirect
+	golang.org/x/term v0.19.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	golang.org/x/tools v0.13.0 // indirect
