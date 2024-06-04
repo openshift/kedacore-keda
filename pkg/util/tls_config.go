@@ -67,6 +67,12 @@ func NewTLSConfigWithPassword(clientCert, clientKey, clientKeyPassword, caCert s
 	return config, nil
 }
 
+// SetCACertDirs sets location(s) containing CA certificates which should be trusted for
+// all future calls to CreateTLSClientConfig
+func SetCACertDirs(caCertDirs []string) {
+	setCACertDirs(caCertDirs)
+}
+
 // NewTLSConfig returns a *tls.Config using the given ceClient cert, ceClient key,
 // and CA certificate. If none are appropriate, a nil *tls.Config is returned.
 func NewTLSConfig(clientCert, clientKey, caCert string, unsafeSsl bool) (*tls.Config, error) {
