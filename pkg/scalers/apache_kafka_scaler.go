@@ -35,6 +35,8 @@ import (
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
+	awsutils "github.com/kedacore/keda/v2/pkg/scalers/aws"
+	"github.com/kedacore/keda/v2/pkg/scalers/scalersconfig"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
@@ -60,6 +62,7 @@ type apacheKafkaMetadata struct {
 	// If an invalid offset is found, whether to scale to 1 (false - the default) so consumption can
 	// occur or scale to 0 (true). See discussion in https://github.com/kedacore/keda/issues/2612
 	scaleToZeroOnInvalidOffset bool
+	limitToPartitionsWithLag   bool
 
 	// SASL
 	saslType kafkaSaslType
@@ -69,7 +72,7 @@ type apacheKafkaMetadata struct {
 	// MSK
 	awsRegion        string
 	awsEndpoint      string
-	awsAuthorization awsAuthorizationMetadata
+	awsAuthorization awsutils.AuthorizationMetadata
 
 	// TLS
 	enableTLS   bool
@@ -78,7 +81,7 @@ type apacheKafkaMetadata struct {
 	keyPassword string
 	ca          string
 
-	scalerIndex int
+	triggerIndex int
 }
 
 const (
@@ -86,7 +89,7 @@ const (
 )
 
 // NewApacheKafkaScaler creates a new apacheKafkaScaler
-func NewApacheKafkaScaler(ctx context.Context, config *ScalerConfig) (Scaler, error) {
+func NewApacheKafkaScaler(ctx context.Context, config *scalersconfig.ScalerConfig) (Scaler, error) {
 	metricType, err := GetMetricTargetType(config)
 	if err != nil {
 		return nil, fmt.Errorf("error getting scaler metric type: %w", err)
@@ -115,7 +118,7 @@ func NewApacheKafkaScaler(ctx context.Context, config *ScalerConfig) (Scaler, er
 	}, nil
 }
 
-func parseApacheKafkaAuthParams(config *ScalerConfig, meta *apacheKafkaMetadata) error {
+func parseApacheKafkaAuthParams(config *scalersconfig.ScalerConfig, meta *apacheKafkaMetadata) error {
 	meta.enableTLS = false
 	enableTLS := false
 	if val, ok := config.TriggerMetadata["tls"]; ok {
@@ -195,7 +198,7 @@ func parseApacheKafkaAuthParams(config *ScalerConfig, meta *apacheKafkaMetadata)
 			} else {
 				return errors.New("no awsRegion given")
 			}
-			auth, err := getAwsAuthorization(config.AuthParams, config.TriggerMetadata, config.ResolvedEnv)
+			auth, err := awsutils.GetAwsAuthorization(config.TriggerUniqueKey, config.PodIdentity, config.TriggerMetadata, config.AuthParams, config.ResolvedEnv)
 			if err != nil {
 				return err
 			}
@@ -225,7 +228,7 @@ func parseApacheKafkaAuthParams(config *ScalerConfig, meta *apacheKafkaMetadata)
 	return nil
 }
 
-func parseApacheKafkaMetadata(config *ScalerConfig, logger logr.Logger) (apacheKafkaMetadata, error) {
+func parseApacheKafkaMetadata(config *scalersconfig.ScalerConfig, logger logr.Logger) (apacheKafkaMetadata, error) {
 	meta := apacheKafkaMetadata{}
 	switch {
 	case config.TriggerMetadata["bootstrapServersFromEnv"] != "":
@@ -339,7 +342,23 @@ func parseApacheKafkaMetadata(config *ScalerConfig, logger logr.Logger) (apacheK
 		meta.scaleToZeroOnInvalidOffset = t
 	}
 
-	meta.scalerIndex = config.ScalerIndex
+	meta.limitToPartitionsWithLag = false
+	if val, ok := config.TriggerMetadata["limitToPartitionsWithLag"]; ok {
+		t, err := strconv.ParseBool(val)
+		if err != nil {
+			return meta, fmt.Errorf("error parsing limitToPartitionsWithLag: %w", err)
+		}
+		meta.limitToPartitionsWithLag = t
+
+		if meta.allowIdleConsumers && meta.limitToPartitionsWithLag {
+			return meta, fmt.Errorf("allowIdleConsumers and limitToPartitionsWithLag cannot be set simultaneously")
+		}
+		if len(meta.topic) == 0 && meta.limitToPartitionsWithLag {
+			return meta, fmt.Errorf("topic must be specified when using limitToPartitionsWithLag")
+		}
+	}
+
+	meta.triggerIndex = config.TriggerIndex
 	return meta, nil
 }
 
@@ -377,7 +396,7 @@ func getApacheKafkaClient(ctx context.Context, metadata apacheKafkaMetadata, log
 	case KafkaSASLTypeOAuthbearer:
 		return nil, errors.New("SASL/OAUTHBEARER is not implemented yet")
 	case KafkaSASLTypeMskIam:
-		cfg, err := getAwsConfig(ctx, metadata.awsRegion, metadata.awsAuthorization)
+		cfg, err := awsutils.GetAwsConfig(ctx, metadata.awsRegion, metadata.awsAuthorization)
 		if err != nil {
 			return nil, err
 		}
@@ -409,7 +428,7 @@ func (s *apacheKafkaScaler) getTopicPartitions(ctx context.Context) (map[string]
 	if err != nil {
 		return nil, fmt.Errorf("error getting metadata: %w", err)
 	}
-	s.logger.V(4).Info(fmt.Sprintf("Listed topics %v", metadata.Topics))
+	s.logger.V(1).Info(fmt.Sprintf("Listed topics %v", metadata.Topics))
 
 	if len(s.metadata.topic) == 0 {
 		// in case of empty topic name, we will get all topics that the consumer group is subscribed to
@@ -564,7 +583,7 @@ func (s *apacheKafkaScaler) GetMetricSpecForScaling(context.Context) []v2.Metric
 
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
-			Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, kedautil.NormalizeString(metricName)),
+			Name: GenerateMetricNameWithIndex(s.metadata.triggerIndex, kedautil.NormalizeString(metricName)),
 		},
 		Target: GetMetricTarget(s.metricType, s.metadata.lagThreshold),
 	}
@@ -639,6 +658,7 @@ func (s *apacheKafkaScaler) getTotalLag(ctx context.Context) (int64, int64, erro
 	totalLag := int64(0)
 	totalLagWithPersistent := int64(0)
 	totalTopicPartitions := int64(0)
+	partitionsWithLag := int64(0)
 
 	for topic, partitionsOffsets := range producerOffsets {
 		for partition := range partitionsOffsets {
@@ -648,6 +668,10 @@ func (s *apacheKafkaScaler) getTotalLag(ctx context.Context) (int64, int64, erro
 			}
 			totalLag += lag
 			totalLagWithPersistent += lagWithPersistent
+
+			if lag > 0 {
+				partitionsWithLag++
+			}
 		}
 		totalTopicPartitions += (int64)(len(partitionsOffsets))
 	}
@@ -655,10 +679,15 @@ func (s *apacheKafkaScaler) getTotalLag(ctx context.Context) (int64, int64, erro
 
 	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Consumer offsets %v, producer offsets %v", consumerOffsets, producerOffsets))
 
-	if !s.metadata.allowIdleConsumers {
-		// don't scale out beyond the number of topicPartitions
-		if (totalLag / s.metadata.lagThreshold) > totalTopicPartitions {
-			totalLag = totalTopicPartitions * s.metadata.lagThreshold
+	if !s.metadata.allowIdleConsumers || s.metadata.limitToPartitionsWithLag {
+		// don't scale out beyond the number of topicPartitions or partitionsWithLag depending on settings
+		upperBound := totalTopicPartitions
+		if s.metadata.limitToPartitionsWithLag {
+			upperBound = partitionsWithLag
+		}
+
+		if (totalLag / s.metadata.lagThreshold) > upperBound {
+			totalLag = upperBound * s.metadata.lagThreshold
 		}
 	}
 	return totalLag, totalLagWithPersistent, nil

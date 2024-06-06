@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -82,10 +81,7 @@ var (
 	AzureRunWorkloadIdentityTests = os.Getenv("AZURE_RUN_WORKLOAD_IDENTITY_TESTS")
 	AwsIdentityTests              = os.Getenv("AWS_RUN_IDENTITY_TESTS")
 	GcpIdentityTests              = os.Getenv("GCP_RUN_IDENTITY_TESTS")
-	EnableOpentelemetry           = os.Getenv("ENABLE_OPENTELEMETRY")
 	InstallCertManager            = AwsIdentityTests == StringTrue || GcpIdentityTests == StringTrue
-	InstallKeda                   = os.Getenv("E2E_INSTALL_KEDA")
-	InstallKafka                  = os.Getenv("E2E_INSTALL_KAFKA")
 )
 
 var (
@@ -158,7 +154,7 @@ func ExecCommandOnSpecificPod(t *testing.T, podName string, namespace string, co
 	}
 	buf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
-	request := KubeClient.CoreV1().RESTClient().Post().
+	request := GetKubernetesClient(t).CoreV1().RESTClient().Post().
 		Resource("pods").Name(podName).Namespace(namespace).
 		SubResource("exec").Timeout(time.Second*20).
 		VersionedParams(&corev1.PodExecOptions{
@@ -236,78 +232,19 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-			Labels: map[string]string{"type": "e2e",
-				//TODO(jkyros): I don't like this but some of the stuff we're running doesn't react well to being unprivileged right now.
-				"pod-security.kubernetes.io/enforce": "privileged",
-				"pod-security.kubernetes.io/audit":   "privileged",
-				"pod-security.kubernetes.io/warn":    "privileged",
-			},
+			Name:   nsName,
+			Labels: map[string]string{"type": "e2e"},
 		},
 	}
 
 	_, err := kc.CoreV1().Namespaces().Create(context.Background(), namespace, metav1.CreateOptions{})
 	assert.NoErrorf(t, err, "cannot create kubernetes namespace - %s", err)
-
-	// For openshift, we need to allow the service accounts here to use sccs other than restricted, at least
-	// until we can refactor some of these tests to run under restricted, so this gives the service accounts
-	// in the test namespaces the ability to run privileged/anyuid pods
-	for _, rolebinding := range []*rbacv1.RoleBinding{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:privileged",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:privileged",
-				Kind: "ClusterRole",
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:anyuid",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				// Most of the manifests in here require privilege in order to bind to
-				// port 80. I think it was mostly done for expedience, I'm sure that
-				// someday we could re-arrange the tests so they can run under 'restricted'
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-				// The promethus server test runs as its own service account and has a
-				// security context specified that requires anyuid
-				{
-					Kind:      "ServiceAccount",
-					Name:      "prometheus-test-server",
-					Namespace: "prometheus-test-ns",
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:anyuid",
-				Kind: "ClusterRole",
-			},
-		},
-	} {
-		_, err := kc.RbacV1().RoleBindings(namespace.Name).Create(context.Background(), rolebinding, metav1.CreateOptions{})
-		assert.NoError(t, err, "cannot bind service accounts to SCCs")
-	}
-
 }
 
 func DeleteNamespace(t *testing.T, nsName string) {
 	t.Logf("deleting namespace %s", nsName)
 	period := int64(0)
-	err := KubeClient.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{
+	err := GetKubernetesClient(t).CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{
 		GracePeriodSeconds: &period,
 	})
 	if errors.IsNotFound(err) {
@@ -359,7 +296,7 @@ func WaitForAllJobsSuccess(t *testing.T, kc *kubernetes.Clientset, namespace str
 func WaitForNamespaceDeletion(t *testing.T, nsName string) bool {
 	for i := 0; i < 120; i++ {
 		t.Logf("waiting for namespace %s deletion", nsName)
-		_, err := KubeClient.CoreV1().Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
+		_, err := GetKubernetesClient(t).CoreV1().Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
 		if err != nil && errors.IsNotFound(err) {
 			return true
 		}
@@ -606,34 +543,8 @@ type Template struct {
 	Name, Config string
 }
 
-// running this in OpenShift CI is a challenge with pull limits, so we need to replace some images with
-// ones we have cached. This is obviously not ideal, and should be refactored later.
-var imageRewrites = map[string]string{
-	"nginxinc/nginx-unprivileged":             preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-	"nginxinc/nginx-unprivileged:alpine-slim": preferEnv("quay.io/jkyros/nginx-unprivileged:alpine-slim", "IMG_NGINX_UNPRIVILEGED_SLIM"),
-	"confluentinc/cp-kafka:5.2.1":             preferEnv("quay.io/jkyros/cp-kafka:5.2.1", "IMG_KAFKA"),
-	"nginx:1.14.2":                            preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-}
-
-// preverEnv returns the env value if populated, otherwise it returns the default string
-// it's used to allow test container images to be overridden by environment variables.
-func preferEnv(defaultValue, env string) string {
-	if val, ok := os.LookupEnv(env); ok {
-		return val
-	}
-	return defaultValue
-}
-
 func KubectlApplyWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
 	t.Logf("Applying template: %s", templateName)
-
-	// If we're on openshift, rewrite the images on the templates to point to smoething we can pull
-	// TODO(jkyros): these should be injectable via env or something so we can use the images
-	// we've already pulled into CI
-	// TODO(jkyros): it is a shame we don't have a "pull interceptor" in CI
-	for old, new := range imageRewrites {
-		config = strings.ReplaceAll(config, old, new)
-	}
 
 	tmpl, err := template.New("kubernetes resource template").Parse(config)
 	assert.NoErrorf(t, err, "cannot parse template - %s", err)
@@ -680,6 +591,27 @@ func KubectlApplyMultipleWithTemplate(t *testing.T, data interface{}, templates 
 	}
 }
 
+func KubectlReplaceWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
+	t.Logf("Applying template: %s", templateName)
+
+	tmpl, err := template.New("kubernetes resource template").Parse(config)
+	assert.NoErrorf(t, err, "cannot parse template - %s", err)
+
+	tempFile, err := os.CreateTemp("", templateName)
+	assert.NoErrorf(t, err, "cannot create temp file - %s", err)
+
+	defer os.Remove(tempFile.Name())
+
+	err = tmpl.Execute(tempFile, data)
+	assert.NoErrorf(t, err, "cannot insert data into template - %s", err)
+
+	_, err = ExecuteCommand(fmt.Sprintf("kubectl replace -f %s --force", tempFile.Name()))
+	assert.NoErrorf(t, err, "cannot replace file - %s", err)
+
+	err = tempFile.Close()
+	assert.NoErrorf(t, err, "cannot close temp file - %s", err)
+}
+
 func KubectlDeleteWithTemplate(t *testing.T, data interface{}, templateName, config string) {
 	t.Logf("Deleting template: %s", templateName)
 
@@ -709,6 +641,22 @@ func KubectlDeleteMultipleWithTemplate(t *testing.T, data interface{}, templates
 	}
 }
 
+func KubectlCopyToPod(t *testing.T, content string, remotePath, pod, namespace string) {
+	tempFile, err := os.CreateTemp("", "copy-to-pod")
+	assert.NoErrorf(t, err, "cannot create temp file - %s", err)
+	defer os.Remove(tempFile.Name())
+
+	_, err = tempFile.WriteString(content)
+	assert.NoErrorf(t, err, "cannot write temp file - %s", err)
+
+	commnand := fmt.Sprintf("kubectl cp %s %s:/%s -n %s", tempFile.Name(), pod, remotePath, namespace)
+	_, err = ExecuteCommand(commnand)
+	assert.NoErrorf(t, err, "cannot copy file - %s", err)
+
+	err = tempFile.Close()
+	assert.NoErrorf(t, err, "cannot close temp file - %s", err)
+}
+
 func CreateKubernetesResources(t *testing.T, kc *kubernetes.Clientset, nsName string, data interface{}, templates []Template) {
 	CreateNamespace(t, kc, nsName)
 	KubectlApplyMultipleWithTemplate(t, data, templates)
@@ -730,21 +678,22 @@ func RemoveANSI(input string) string {
 	return reg.ReplaceAllString(input, "")
 }
 
-func FindPodLogs(kc *kubernetes.Clientset, namespace, label string) ([]string, error) {
-	var podLogs []string
+func FindPodLogs(kc *kubernetes.Clientset, namespace, label string, includePrevious bool) ([]string, error) {
 	pods, err := kc.CoreV1().Pods(namespace).List(context.TODO(),
 		metav1.ListOptions{LabelSelector: label})
 	if err != nil {
 		return []string{}, err
 	}
-	var podLogRequest *rest.Request
-	for _, v := range pods.Items {
-		podLogRequest = kc.CoreV1().Pods(namespace).GetLogs(v.Name, &corev1.PodLogOptions{})
+	getPodLogs := func(pod *corev1.Pod, previous bool) ([]string, error) {
+		podLogRequest := kc.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+			Previous: previous,
+		})
 		stream, err := podLogRequest.Stream(context.TODO())
 		if err != nil {
 			return []string{}, err
 		}
 		defer stream.Close()
+		logs := []string{}
 		for {
 			buf := make([]byte, 2000)
 			numBytes, err := stream.Read(buf)
@@ -757,10 +706,38 @@ func FindPodLogs(kc *kubernetes.Clientset, namespace, label string) ([]string, e
 			if err != nil {
 				return []string{}, err
 			}
-			podLogs = append(podLogs, string(buf[:numBytes]))
+			logs = append(logs, string(buf[:numBytes]))
 		}
+		return logs, nil
 	}
-	return podLogs, nil
+
+	var outputLogs []string
+	for _, pod := range pods.Items {
+		getPrevious := false
+		if includePrevious {
+			for _, container := range pod.Status.ContainerStatuses {
+				if container.RestartCount > 0 {
+					getPrevious = true
+				}
+			}
+		}
+
+		if getPrevious {
+			podLogs, err := getPodLogs(&pod, true)
+			if err != nil {
+				return []string{}, err
+			}
+			outputLogs = append(outputLogs, podLogs...)
+			outputLogs = append(outputLogs, "=====================RESTART=====================\n")
+		}
+
+		podLogs, err := getPodLogs(&pod, false)
+		if err != nil {
+			return []string{}, err
+		}
+		outputLogs = append(outputLogs, podLogs...)
+	}
+	return outputLogs, nil
 }
 
 // Delete all pods in namespace by selector

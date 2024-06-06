@@ -124,7 +124,7 @@ func TestSetupAwsIdentityComponents(t *testing.T) {
 	KubeClient = GetKubernetesClient(t)
 	CreateNamespace(t, KubeClient, AwsIdentityNamespace)
 
-	_, err = ExecuteCommand(fmt.Sprintf("helm upgrade --install aws-identity-webhook jkroepke/amazon-eks-pod-identity-webhook --namespace %s --set fullnameOverride=aws-identity-webhook",
+	_, err = ExecuteCommand(fmt.Sprintf("helm upgrade --install aws-identity-webhook jkroepke/amazon-eks-pod-identity-webhook --namespace %s --set config.defaultAwsRegion=eu-west-2 --set fullnameOverride=aws-identity-webhook",
 		AwsIdentityNamespace))
 	require.NoErrorf(t, err, "cannot install workload identity webhook - %s", err)
 }
@@ -169,10 +169,6 @@ func TesVerifyPodsIdentity(t *testing.T) {
 }
 
 func TestSetupOpentelemetryComponents(t *testing.T) {
-	if EnableOpentelemetry == "" || EnableOpentelemetry == StringFalse {
-		t.Skip("skipping installing opentelemetry")
-	}
-
 	otlpTempFileName := "otlp.yml"
 	otlpServiceTempFileName := "otlpServicePatch.yml"
 	defer os.Remove(otlpTempFileName)
@@ -192,19 +188,18 @@ func TestSetupOpentelemetryComponents(t *testing.T) {
 	_, err = ExecuteCommand("helm repo update open-telemetry")
 	require.NoErrorf(t, err, "cannot update open-telemetry helm repo - %s", err)
 
-	_, err = ExecuteCommand(fmt.Sprintf("helm upgrade --install opentelemetry-collector open-telemetry/opentelemetry-collector -f %s", otlpTempFileName))
+	KubeClient = GetKubernetesClient(t)
+	CreateNamespace(t, KubeClient, OpentelemetryNamespace)
+
+	_, err = ExecuteCommand(fmt.Sprintf("helm upgrade --install opentelemetry-collector open-telemetry/opentelemetry-collector -f %s --namespace %s", otlpTempFileName, OpentelemetryNamespace))
 
 	require.NoErrorf(t, err, "cannot install opentelemetry - %s", err)
 
-	_, err = ExecuteCommand(fmt.Sprintf("kubectl apply -f %s", otlpServiceTempFileName))
+	_, err = ExecuteCommand(fmt.Sprintf("kubectl apply -f %s -n %s", otlpServiceTempFileName, OpentelemetryNamespace))
 	require.NoErrorf(t, err, "cannot update opentelemetry ports - %s", err)
 }
 
 func TestDeployKEDA(t *testing.T) {
-	// default to true
-	if InstallKeda == StringFalse {
-		t.Skip("skipping as requested -- KEDA assumed to be already installed")
-	}
 	KubeClient = GetKubernetesClient(t)
 	CreateNamespace(t, KubeClient, KEDANamespace)
 
@@ -230,10 +225,6 @@ func TestDeployKEDA(t *testing.T) {
 }
 
 func TestVerifyKEDA(t *testing.T) {
-	// default to true
-	if InstallKeda == StringFalse {
-		t.Skip("skipping as requested -- KEDA assumed to be already installed")
-	}
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, KubeClient, KEDAOperator, KEDANamespace, 1, 30, 6),
 		"replica count should be 1 after 3 minutes")
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, KubeClient, KEDAMetricsAPIServer, KEDANamespace, 1, 30, 6),
@@ -273,10 +264,6 @@ func TestSetupAadPodIdentityComponents(t *testing.T) {
 }
 
 func TestSetUpStrimzi(t *testing.T) {
-	// default to true
-	if InstallKafka == StringFalse {
-		t.Skip("skipping as requested -- Kafka assumed to be unneeded or already installed")
-	}
 	t.Log("--- installing kafka operator ---")
 	_, err := ExecuteCommand("helm repo add strimzi https://strimzi.io/charts/")
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)

@@ -903,10 +903,10 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) (br BatchResults) {
 		return &batchResults{ctx: ctx, conn: c, err: err}
 	}
 
-	for _, bi := range b.QueuedQueries {
+	for _, bi := range b.queuedQueries {
 		var queryRewriter QueryRewriter
-		sql := bi.SQL
-		arguments := bi.Arguments
+		sql := bi.query
+		arguments := bi.arguments
 
 	optionLoop:
 		for len(arguments) > 0 {
@@ -928,8 +928,8 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) (br BatchResults) {
 			}
 		}
 
-		bi.SQL = sql
-		bi.Arguments = arguments
+		bi.query = sql
+		bi.arguments = arguments
 	}
 
 	// TODO: changing mode per batch? Update Batch.Queue function comment when implemented
@@ -939,8 +939,8 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) (br BatchResults) {
 	}
 
 	// All other modes use extended protocol and thus can use prepared statements.
-	for _, bi := range b.QueuedQueries {
-		if sd, ok := c.preparedStatements[bi.SQL]; ok {
+	for _, bi := range b.queuedQueries {
+		if sd, ok := c.preparedStatements[bi.query]; ok {
 			bi.sd = sd
 		}
 	}
@@ -961,11 +961,11 @@ func (c *Conn) SendBatch(ctx context.Context, b *Batch) (br BatchResults) {
 
 func (c *Conn) sendBatchQueryExecModeSimpleProtocol(ctx context.Context, b *Batch) *batchResults {
 	var sb strings.Builder
-	for i, bi := range b.QueuedQueries {
+	for i, bi := range b.queuedQueries {
 		if i > 0 {
 			sb.WriteByte(';')
 		}
-		sql, err := c.sanitizeForSimpleQuery(bi.SQL, bi.Arguments...)
+		sql, err := c.sanitizeForSimpleQuery(bi.query, bi.arguments...)
 		if err != nil {
 			return &batchResults{ctx: ctx, conn: c, err: err}
 		}
@@ -984,21 +984,21 @@ func (c *Conn) sendBatchQueryExecModeSimpleProtocol(ctx context.Context, b *Batc
 func (c *Conn) sendBatchQueryExecModeExec(ctx context.Context, b *Batch) *batchResults {
 	batch := &pgconn.Batch{}
 
-	for _, bi := range b.QueuedQueries {
+	for _, bi := range b.queuedQueries {
 		sd := bi.sd
 		if sd != nil {
-			err := c.eqb.Build(c.typeMap, sd, bi.Arguments)
+			err := c.eqb.Build(c.typeMap, sd, bi.arguments)
 			if err != nil {
 				return &batchResults{ctx: ctx, conn: c, err: err}
 			}
 
 			batch.ExecPrepared(sd.Name, c.eqb.ParamValues, c.eqb.ParamFormats, c.eqb.ResultFormats)
 		} else {
-			err := c.eqb.Build(c.typeMap, nil, bi.Arguments)
+			err := c.eqb.Build(c.typeMap, nil, bi.arguments)
 			if err != nil {
 				return &batchResults{ctx: ctx, conn: c, err: err}
 			}
-			batch.ExecParams(bi.SQL, c.eqb.ParamValues, nil, c.eqb.ParamFormats, c.eqb.ResultFormats)
+			batch.ExecParams(bi.query, c.eqb.ParamValues, nil, c.eqb.ParamFormats, c.eqb.ResultFormats)
 		}
 	}
 
@@ -1023,18 +1023,18 @@ func (c *Conn) sendBatchQueryExecModeCacheStatement(ctx context.Context, b *Batc
 	distinctNewQueries := []*pgconn.StatementDescription{}
 	distinctNewQueriesIdxMap := make(map[string]int)
 
-	for _, bi := range b.QueuedQueries {
+	for _, bi := range b.queuedQueries {
 		if bi.sd == nil {
-			sd := c.statementCache.Get(bi.SQL)
+			sd := c.statementCache.Get(bi.query)
 			if sd != nil {
 				bi.sd = sd
 			} else {
-				if idx, present := distinctNewQueriesIdxMap[bi.SQL]; present {
+				if idx, present := distinctNewQueriesIdxMap[bi.query]; present {
 					bi.sd = distinctNewQueries[idx]
 				} else {
 					sd = &pgconn.StatementDescription{
-						Name: stmtcache.StatementName(bi.SQL),
-						SQL:  bi.SQL,
+						Name: stmtcache.StatementName(bi.query),
+						SQL:  bi.query,
 					}
 					distinctNewQueriesIdxMap[sd.SQL] = len(distinctNewQueries)
 					distinctNewQueries = append(distinctNewQueries, sd)
@@ -1055,17 +1055,17 @@ func (c *Conn) sendBatchQueryExecModeCacheDescribe(ctx context.Context, b *Batch
 	distinctNewQueries := []*pgconn.StatementDescription{}
 	distinctNewQueriesIdxMap := make(map[string]int)
 
-	for _, bi := range b.QueuedQueries {
+	for _, bi := range b.queuedQueries {
 		if bi.sd == nil {
-			sd := c.descriptionCache.Get(bi.SQL)
+			sd := c.descriptionCache.Get(bi.query)
 			if sd != nil {
 				bi.sd = sd
 			} else {
-				if idx, present := distinctNewQueriesIdxMap[bi.SQL]; present {
+				if idx, present := distinctNewQueriesIdxMap[bi.query]; present {
 					bi.sd = distinctNewQueries[idx]
 				} else {
 					sd = &pgconn.StatementDescription{
-						SQL: bi.SQL,
+						SQL: bi.query,
 					}
 					distinctNewQueriesIdxMap[sd.SQL] = len(distinctNewQueries)
 					distinctNewQueries = append(distinctNewQueries, sd)
@@ -1082,13 +1082,13 @@ func (c *Conn) sendBatchQueryExecModeDescribeExec(ctx context.Context, b *Batch)
 	distinctNewQueries := []*pgconn.StatementDescription{}
 	distinctNewQueriesIdxMap := make(map[string]int)
 
-	for _, bi := range b.QueuedQueries {
+	for _, bi := range b.queuedQueries {
 		if bi.sd == nil {
-			if idx, present := distinctNewQueriesIdxMap[bi.SQL]; present {
+			if idx, present := distinctNewQueriesIdxMap[bi.query]; present {
 				bi.sd = distinctNewQueries[idx]
 			} else {
 				sd := &pgconn.StatementDescription{
-					SQL: bi.SQL,
+					SQL: bi.query,
 				}
 				distinctNewQueriesIdxMap[sd.SQL] = len(distinctNewQueries)
 				distinctNewQueries = append(distinctNewQueries, sd)
@@ -1154,11 +1154,11 @@ func (c *Conn) sendBatchExtendedWithDescription(ctx context.Context, b *Batch, d
 	}
 
 	// Queue the queries.
-	for _, bi := range b.QueuedQueries {
-		err := c.eqb.Build(c.typeMap, bi.sd, bi.Arguments)
+	for _, bi := range b.queuedQueries {
+		err := c.eqb.Build(c.typeMap, bi.sd, bi.arguments)
 		if err != nil {
 			// we wrap the error so we the user can understand which query failed inside the batch
-			err = fmt.Errorf("error building query %s: %w", bi.SQL, err)
+			err = fmt.Errorf("error building query %s: %w", bi.query, err)
 			return &pipelineBatchResults{ctx: ctx, conn: c, err: err, closed: true}
 		}
 
@@ -1203,15 +1203,7 @@ func (c *Conn) sanitizeForSimpleQuery(sql string, args ...any) (string, error) {
 	return sanitize.SanitizeSQL(sql, valueArgs...)
 }
 
-// LoadType inspects the database for typeName and produces a pgtype.Type suitable for registration. typeName must be
-// the name of a type where the underlying type(s) is already understood by pgx. It is for derived types. In particular,
-// typeName must be one of the following:
-//   - An array type name of a type that is already registered. e.g. "_foo" when "foo" is registered.
-//   - A composite type name where all field types are already registered.
-//   - A domain type name where the base type is already registered.
-//   - An enum type name.
-//   - A range type name where the element type is already registered.
-//   - A multirange type name where the element type is already registered.
+// LoadType inspects the database for typeName and produces a pgtype.Type suitable for registration.
 func (c *Conn) LoadType(ctx context.Context, typeName string) (*pgtype.Type, error) {
 	var oid uint32
 
@@ -1354,17 +1346,17 @@ order by attnum`,
 }
 
 func (c *Conn) deallocateInvalidatedCachedStatements(ctx context.Context) error {
-	if txStatus := c.pgConn.TxStatus(); txStatus != 'I' && txStatus != 'T' {
+	if c.pgConn.TxStatus() != 'I' {
 		return nil
 	}
 
 	if c.descriptionCache != nil {
-		c.descriptionCache.RemoveInvalidated()
+		c.descriptionCache.HandleInvalidated()
 	}
 
 	var invalidatedStatements []*pgconn.StatementDescription
 	if c.statementCache != nil {
-		invalidatedStatements = c.statementCache.GetInvalidated()
+		invalidatedStatements = c.statementCache.HandleInvalidated()
 	}
 
 	if len(invalidatedStatements) == 0 {
@@ -1376,6 +1368,7 @@ func (c *Conn) deallocateInvalidatedCachedStatements(ctx context.Context) error 
 
 	for _, sd := range invalidatedStatements {
 		pipeline.SendDeallocate(sd.Name)
+		delete(c.preparedStatements, sd.Name)
 	}
 
 	err := pipeline.Sync()
@@ -1386,11 +1379,6 @@ func (c *Conn) deallocateInvalidatedCachedStatements(ctx context.Context) error 
 	err = pipeline.Close()
 	if err != nil {
 		return fmt.Errorf("failed to deallocate cached statement(s): %w", err)
-	}
-
-	c.statementCache.RemoveInvalidated()
-	for _, sd := range invalidatedStatements {
-		delete(c.preparedStatements, sd.Name)
 	}
 
 	return nil

@@ -180,24 +180,46 @@ func ResolveAuthRefAndPodIdentity(ctx context.Context, client client.Client, log
 	triggerAuthRef *kedav1alpha1.AuthenticationRef, podTemplateSpec *corev1.PodTemplateSpec,
 	namespace string, secretsLister corev1listers.SecretLister) (map[string]string, kedav1alpha1.AuthPodIdentity, error) {
 	if podTemplateSpec != nil {
-		authParams, podIdentity := resolveAuthRef(ctx, client, logger, triggerAuthRef, &podTemplateSpec.Spec, namespace, secretsLister)
+		authParams, podIdentity, err := resolveAuthRef(ctx, client, logger, triggerAuthRef, &podTemplateSpec.Spec, namespace, secretsLister)
 
+		if err != nil {
+			return authParams, podIdentity, err
+		}
 		switch podIdentity.Provider {
-		case kedav1alpha1.PodIdentityProviderAwsEKS:
-			serviceAccountName := defaultServiceAccount
-			if podTemplateSpec.Spec.ServiceAccountName != "" {
-				serviceAccountName = podTemplateSpec.Spec.ServiceAccountName
+		case kedav1alpha1.PodIdentityProviderAws:
+			if podIdentity.RoleArn != "" {
+				if podIdentity.IsWorkloadIdentityOwner() {
+					return nil, kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone},
+						fmt.Errorf("roleArn can't be set if KEDA isn't identity owner, current value: '%s'", *podIdentity.IdentityOwner)
+				}
+				authParams["awsRoleArn"] = podIdentity.RoleArn
 			}
-			serviceAccount := &corev1.ServiceAccount{}
-			err := client.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: namespace}, serviceAccount)
+			if podIdentity.IsWorkloadIdentityOwner() {
+				value, err := resolveServiceAccountAnnotation(ctx, client, podTemplateSpec.Spec.ServiceAccountName, namespace, kedav1alpha1.PodIdentityAnnotationEKS, true)
+				if err != nil {
+					return nil, kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone},
+						fmt.Errorf("error getting service account: '%s', error: %w", podTemplateSpec.Spec.ServiceAccountName, err)
+				}
+				authParams["awsRoleArn"] = value
+			}
+		case kedav1alpha1.PodIdentityProviderAwsEKS:
+			value, err := resolveServiceAccountAnnotation(ctx, client, podTemplateSpec.Spec.ServiceAccountName, namespace, kedav1alpha1.PodIdentityAnnotationEKS, false)
 			if err != nil {
 				return nil, kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone},
-					fmt.Errorf("error getting service account: '%s', error: %w", serviceAccountName, err)
+					fmt.Errorf("error getting service account: '%s', error: %w", podTemplateSpec.Spec.ServiceAccountName, err)
 			}
-			authParams["awsRoleArn"] = serviceAccount.Annotations[kedav1alpha1.PodIdentityAnnotationEKS]
+			authParams["awsRoleArn"] = value
+			// FIXME: Delete this for v3
+			logger.Info("WARNING: AWS EKS Identity has been deprecated (https://github.com/kedacore/keda/discussions/5343) and will be removed from KEDA on v3")
 		case kedav1alpha1.PodIdentityProviderAwsKiam:
 			authParams["awsRoleArn"] = podTemplateSpec.ObjectMeta.Annotations[kedav1alpha1.PodIdentityAnnotationKiam]
+			// FIXME: Delete this for v2.15
+			logger.Info("WARNING: AWS Kiam Identity has been abandoned (https://github.com/uswitch/kiam/commit/29504044e67cb432db03c71a2c3ada56a3c3046d) and will be removed from KEDA on v2.15")
 		case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
+			if podIdentity.Provider == kedav1alpha1.PodIdentityProviderAzure {
+				// FIXME: Delete this for v2.15
+				logger.Info("WARNING: Azure AD Pod Identity has been archived (https://github.com/Azure/aad-pod-identity#-announcement) and will be removed from KEDA on v2.15")
+			}
 			if podIdentity.IdentityID != nil && *podIdentity.IdentityID == "" {
 				return nil, kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone}, fmt.Errorf("IdentityID of PodIdentity should not be empty")
 			}
@@ -206,17 +228,17 @@ func ResolveAuthRefAndPodIdentity(ctx context.Context, client client.Client, log
 		return authParams, podIdentity, nil
 	}
 
-	authParams, _ := resolveAuthRef(ctx, client, logger, triggerAuthRef, nil, namespace, secretsLister)
-	return authParams, kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone}, nil
+	return resolveAuthRef(ctx, client, logger, triggerAuthRef, nil, namespace, secretsLister)
 }
 
 // resolveAuthRef provides authentication parameters needed authenticate scaler with the environment.
 // based on authentication method defined in TriggerAuthentication, authParams and podIdentity is returned
 func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logger,
 	triggerAuthRef *kedav1alpha1.AuthenticationRef, podSpec *corev1.PodSpec,
-	namespace string, secretsLister corev1listers.SecretLister) (map[string]string, kedav1alpha1.AuthPodIdentity) {
+	namespace string, secretsLister corev1listers.SecretLister) (map[string]string, kedav1alpha1.AuthPodIdentity, error) {
 	result := make(map[string]string)
-	var podIdentity kedav1alpha1.AuthPodIdentity
+	podIdentity := kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderNone}
+	var err error
 
 	if namespace != "" && triggerAuthRef != nil && triggerAuthRef.Name != "" {
 		triggerAuthSpec, triggerNamespace, err := getTriggerAuthSpec(ctx, client, triggerAuthRef, namespace)
@@ -240,6 +262,11 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 					}
 				}
 			}
+			if triggerAuthSpec.ConfigMapTargetRef != nil {
+				for _, e := range triggerAuthSpec.ConfigMapTargetRef {
+					result[e.Parameter] = resolveAuthConfigMap(ctx, client, logger, e.Name, triggerNamespace, e.Key)
+				}
+			}
 			if triggerAuthSpec.SecretTargetRef != nil {
 				for _, e := range triggerAuthSpec.SecretTargetRef {
 					result[e.Parameter] = resolveAuthSecret(ctx, client, logger, e.Name, triggerNamespace, e.Key, secretsLister)
@@ -248,26 +275,22 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 			if triggerAuthSpec.HashiCorpVault != nil && len(triggerAuthSpec.HashiCorpVault.Secrets) > 0 {
 				vault := NewHashicorpVaultHandler(triggerAuthSpec.HashiCorpVault)
 				err := vault.Initialize(logger)
+				defer vault.Stop()
 				if err != nil {
-					logger.Error(err, "error authenticate to Vault", "triggerAuthRef.Name", triggerAuthRef.Name)
-				} else {
-					for _, e := range triggerAuthSpec.HashiCorpVault.Secrets {
-						secret, err := vault.Read(e.Path)
-						if err != nil {
-							logger.Error(err, "error trying to read secret from Vault", "triggerAuthRef.Name", triggerAuthRef.Name,
-								"secret.path", e.Path)
-						} else {
-							if secret == nil {
-								// sometimes there is no error, but `vault.Read(e.Path)` is not being able to parse the secret and returns nil
-								logger.Error(fmt.Errorf("unable to parse secret, is the provided path correct?"), "Error trying to read secret from Vault",
-									"triggerAuthRef.Name", triggerAuthRef.Name, "secret.path", e.Path)
-							} else {
-								result[e.Parameter] = resolveVaultSecret(logger, secret.Data, e.Key)
-							}
-						}
-					}
+					logger.Error(err, "error authenticating to Vault", "triggerAuthRef.Name", triggerAuthRef.Name)
+					return result, podIdentity, err
+				}
 
-					vault.Stop()
+				secrets, err := vault.ResolveSecrets(triggerAuthSpec.HashiCorpVault.Secrets)
+				if err != nil {
+					logger.Error(err, "could not get secrets from vault",
+						"triggerAuthRef.Name", triggerAuthRef.Name,
+					)
+					return result, podIdentity, err
+				}
+
+				for _, e := range secrets {
+					result[e.Parameter] = e.Value
 				}
 			}
 			if triggerAuthSpec.AzureKeyVault != nil && len(triggerAuthSpec.AzureKeyVault.Secrets) > 0 {
@@ -275,12 +298,53 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 				err := vaultHandler.Initialize(ctx, client, logger, triggerNamespace, secretsLister)
 				if err != nil {
 					logger.Error(err, "error authenticating to Azure Key Vault", "triggerAuthRef.Name", triggerAuthRef.Name)
+					return result, podIdentity, err
+				}
+
+				for _, secret := range triggerAuthSpec.AzureKeyVault.Secrets {
+					res, err := vaultHandler.Read(ctx, secret.Name, secret.Version)
+					if err != nil {
+						logger.Error(err, "error trying to read secret from Azure Key Vault", "triggerAuthRef.Name", triggerAuthRef.Name,
+							"secret.Name", secret.Name, "secret.Version", secret.Version)
+						return result, podIdentity, err
+					}
+
+					result[secret.Parameter] = res
+				}
+			}
+			if triggerAuthSpec.GCPSecretManager != nil && len(triggerAuthSpec.GCPSecretManager.Secrets) > 0 {
+				secretManagerHandler := NewGCPSecretManagerHandler(triggerAuthSpec.GCPSecretManager)
+				err := secretManagerHandler.Initialize(ctx, client, logger, triggerNamespace, secretsLister)
+				if err != nil {
+					logger.Error(err, "error authenticating to GCP Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name)
 				} else {
-					for _, secret := range triggerAuthSpec.AzureKeyVault.Secrets {
-						res, err := vaultHandler.Read(ctx, secret.Name, secret.Version)
+					for _, secret := range triggerAuthSpec.GCPSecretManager.Secrets {
+						version := "latest"
+						if secret.Version != "" {
+							version = secret.Version
+						}
+						res, err := secretManagerHandler.Read(ctx, secret.ID, version)
 						if err != nil {
-							logger.Error(err, "error trying to read secret from Azure Key Vault", "triggerAuthRef.Name", triggerAuthRef.Name,
-								"secret.Name", secret.Name, "secret.Version", secret.Version)
+							logger.Error(err, "error trying to read secret from GCP Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name,
+								"secret.Name", secret.ID, "secret.Version", secret.Version)
+						} else {
+							result[secret.Parameter] = res
+						}
+					}
+				}
+			}
+			if triggerAuthSpec.AwsSecretManager != nil && len(triggerAuthSpec.AwsSecretManager.Secrets) > 0 {
+				awsSecretManagerHandler := NewAwsSecretManagerHandler(triggerAuthSpec.AwsSecretManager)
+				err := awsSecretManagerHandler.Initialize(ctx, client, logger, triggerNamespace, secretsLister, podSpec)
+				defer awsSecretManagerHandler.Stop()
+				if err != nil {
+					logger.Error(err, "error authenticating to Aws Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name)
+				} else {
+					for _, secret := range triggerAuthSpec.AwsSecretManager.Secrets {
+						res, err := awsSecretManagerHandler.Read(ctx, logger, secret.Name, secret.VersionID, secret.VersionStage)
+						if err != nil {
+							logger.Error(err, "error trying to read secret from Aws Secret Manager", "triggerAuthRef.Name", triggerAuthRef.Name,
+								"secret.Name", secret.Name, "secret.Version", secret.VersionID, "secret.VersionStage", secret.VersionStage)
 						} else {
 							result[secret.Parameter] = res
 						}
@@ -290,7 +354,7 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 		}
 	}
 
-	return result, podIdentity
+	return result, podIdentity, err
 }
 
 func getTriggerAuthSpec(ctx context.Context, client client.Client, triggerAuthRef *kedav1alpha1.AuthenticationRef, namespace string) (*kedav1alpha1.TriggerAuthenticationSpec, string, error) {
@@ -505,6 +569,16 @@ func resolveConfigValue(ctx context.Context, client client.Client, configKeyRef 
 	return configMap.Data[keyName], nil
 }
 
+func resolveAuthConfigMap(ctx context.Context, client client.Client, logger logr.Logger, name, namespace, key string) string {
+	ref := &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
+	val, err := resolveConfigValue(ctx, client, ref, key, namespace)
+	if err != nil {
+		logger.Error(err, "error trying to get config map from namespace", "ConfigMap.Namespace", namespace, "ConfigMap.Name", name)
+		return ""
+	}
+	return val
+}
+
 func resolveAuthSecret(ctx context.Context, client client.Client, logger logr.Logger, name, namespace, key string, secretsLister corev1listers.SecretLister) string {
 	if name == "" || namespace == "" || key == "" {
 		logger.Error(fmt.Errorf("error trying to get secret"), "name, namespace and key are required", "Secret.Namespace", namespace, "Secret.Name", name, "key", key)
@@ -531,22 +605,21 @@ func resolveAuthSecret(ctx context.Context, client client.Client, logger logr.Lo
 	return string(result)
 }
 
-func resolveVaultSecret(logger logr.Logger, data map[string]interface{}, key string) string {
-	if v2Data, ok := data["data"].(map[string]interface{}); ok {
-		if value, ok := v2Data[key]; ok {
-			if s, ok := value.(string); ok {
-				return s
-			}
-		} else {
-			logger.Error(fmt.Errorf("key '%s' not found", key), "error trying to get key from Vault secret")
-			return ""
-		}
-	} else if vData, ok := data[key]; ok {
-		if s, ok := vData.(string); ok {
-			return s
-		}
+// resolveServiceAccountAnnotation retrieves the value of a specific annotation
+// from the annotations of a given Kubernetes ServiceAccount.
+func resolveServiceAccountAnnotation(ctx context.Context, client client.Client, name, namespace, annotation string, required bool) (string, error) {
+	serviceAccountName := defaultServiceAccount
+	if name != "" {
+		serviceAccountName = name
 	}
-
-	logger.Error(fmt.Errorf("unable to convert Vault Data value"), "error trying to convert Data secret vaule")
-	return ""
+	serviceAccount := &corev1.ServiceAccount{}
+	err := client.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: namespace}, serviceAccount)
+	if err != nil {
+		return "", fmt.Errorf("error getting service account: '%s', error: %w", serviceAccountName, err)
+	}
+	value, ok := serviceAccount.Annotations[annotation]
+	if !ok && required {
+		return "", fmt.Errorf("annotation '%s' not found", annotation)
+	}
+	return value, nil
 }

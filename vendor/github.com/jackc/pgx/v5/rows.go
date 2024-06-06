@@ -417,9 +417,11 @@ type CollectableRow interface {
 // RowToFunc is a function that scans or otherwise converts row to a T.
 type RowToFunc[T any] func(row CollectableRow) (T, error)
 
-// AppendRows iterates through rows, calling fn for each row, and appending the results into a slice of T.
-func AppendRows[T any, S ~[]T](slice S, rows Rows, fn RowToFunc[T]) (S, error) {
+// CollectRows iterates through rows, calling fn for each row, and collecting the results into a slice of T.
+func CollectRows[T any](rows Rows, fn RowToFunc[T]) ([]T, error) {
 	defer rows.Close()
+
+	slice := []T{}
 
 	for rows.Next() {
 		value, err := fn(rows)
@@ -434,11 +436,6 @@ func AppendRows[T any, S ~[]T](slice S, rows Rows, fn RowToFunc[T]) (S, error) {
 	}
 
 	return slice, nil
-}
-
-// CollectRows iterates through rows, calling fn for each row, and collecting the results into a slice of T.
-func CollectRows[T any](rows Rows, fn RowToFunc[T]) ([]T, error) {
-	return AppendRows([]T{}, rows, fn)
 }
 
 // CollectOneRow calls fn for the first row in rows and returns the result. If no rows are found returns an error where errors.Is(ErrNoRows) is true.

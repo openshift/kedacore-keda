@@ -13,6 +13,7 @@ import (
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
+	"github.com/kedacore/keda/v2/pkg/scalers/scalersconfig"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
@@ -62,7 +63,7 @@ const (
 	solaceTriggermsgrxrate     = "msgrcvrate"
 )
 
-// Struct for Observed Metric Values
+// SolaceMetricValues is the struct for Observed Metric Values
 type SolaceMetricValues struct {
 	//	Observed Message Count
 	msgCount int
@@ -103,7 +104,7 @@ type SolaceMetadata struct {
 	activationMsgSpoolUsageTarget int // Spool Use Target in Megabytes
 	activationMsgRxRateTarget     int // Ingress Rate Target per consumer in msgs/second
 	// Scaler index
-	scalerIndex int
+	triggerIndex int
 }
 
 // SEMP API Response Root Struct
@@ -134,8 +135,8 @@ type solaceSEMPMetadata struct {
 	ResponseCode int `json:"responseCode"`
 }
 
-// Constructor for SolaceScaler
-func NewSolaceScaler(config *ScalerConfig) (Scaler, error) {
+// NewSolaceScaler is the constructor for SolaceScaler
+func NewSolaceScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 	// Create HTTP Client
 	httpClient := kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false)
 
@@ -162,7 +163,7 @@ func NewSolaceScaler(config *ScalerConfig) (Scaler, error) {
 }
 
 // Called by constructor
-func parseSolaceMetadata(config *ScalerConfig) (*SolaceMetadata, error) {
+func parseSolaceMetadata(config *scalersconfig.ScalerConfig) (*SolaceMetadata, error) {
 	meta := SolaceMetadata{}
 	//	GET THE SEMP API ENDPOINT
 	if val, ok := config.TriggerMetadata[solaceMetaSempBaseURL]; ok && val != "" {
@@ -262,12 +263,12 @@ func parseSolaceMetadata(config *ScalerConfig) (*SolaceMetadata, error) {
 		return nil, e
 	}
 
-	meta.scalerIndex = config.ScalerIndex
+	meta.triggerIndex = config.TriggerIndex
 
 	return &meta, nil
 }
 
-func getSolaceSempCredentials(config *ScalerConfig) (u string, p string, err error) {
+func getSolaceSempCredentials(config *scalersconfig.ScalerConfig) (u string, p string, err error) {
 	//	GET CREDENTIALS
 	//	The username must be a valid broker ADMIN user identifier with read access to SEMP for the broker, VPN, and relevant objects
 	//	The scaler will attempt to acquire username and then password independently. For each:
@@ -320,7 +321,7 @@ func (s *SolaceScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec 
 		metricName := kedautil.NormalizeString(fmt.Sprintf("solace-%s-%s", s.metadata.queueName, solaceTriggermsgcount))
 		externalMetric := &v2.ExternalMetricSource{
 			Metric: v2.MetricIdentifier{
-				Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, metricName),
+				Name: GenerateMetricNameWithIndex(s.metadata.triggerIndex, metricName),
 			},
 			Target: GetMetricTarget(s.metricType, s.metadata.msgCountTarget),
 		}
@@ -332,7 +333,7 @@ func (s *SolaceScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec 
 		metricName := kedautil.NormalizeString(fmt.Sprintf("solace-%s-%s", s.metadata.queueName, solaceTriggermsgspoolusage))
 		externalMetric := &v2.ExternalMetricSource{
 			Metric: v2.MetricIdentifier{
-				Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, metricName),
+				Name: GenerateMetricNameWithIndex(s.metadata.triggerIndex, metricName),
 			},
 			Target: GetMetricTarget(s.metricType, s.metadata.msgSpoolUsageTarget),
 		}
@@ -344,7 +345,7 @@ func (s *SolaceScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec 
 		metricName := kedautil.NormalizeString(fmt.Sprintf("solace-%s-%s", s.metadata.queueName, solaceTriggermsgrxrate))
 		externalMetric := &v2.ExternalMetricSource{
 			Metric: v2.MetricIdentifier{
-				Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, metricName),
+				Name: GenerateMetricNameWithIndex(s.metadata.triggerIndex, metricName),
 			},
 			Target: GetMetricTarget(s.metricType, s.metadata.msgRxRateTarget),
 		}
@@ -428,9 +429,9 @@ func (s *SolaceScaler) GetMetricsAndActivity(ctx context.Context, metricName str
 		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 	return []external_metrics.ExternalMetricValue{metric},
-		(metricValues.msgCount > s.metadata.activationMsgCountTarget ||
+		metricValues.msgCount > s.metadata.activationMsgCountTarget ||
 			metricValues.msgSpoolUsage > s.metadata.activationMsgSpoolUsageTarget ||
-			metricValues.msgRcvRate > s.metadata.activationMsgRxRateTarget),
+			metricValues.msgRcvRate > s.metadata.activationMsgRxRateTarget,
 		nil
 }
 
