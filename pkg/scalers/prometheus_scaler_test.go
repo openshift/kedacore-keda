@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/oauth2"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	"github.com/kedacore/keda/v2/pkg/scalers/scalersconfig"
 )
 
 type parsePrometheusMetadataTestData struct {
@@ -26,7 +28,7 @@ type parsePrometheusMetadataTestData struct {
 
 type prometheusMetricIdentifier struct {
 	metadataTestData *parsePrometheusMetadataTestData
-	scalerIndex      int
+	triggerIndex     int
 	name             string
 }
 
@@ -60,6 +62,10 @@ var testPromMetadata = []parsePrometheusMetadataTestData{
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "customHeaders": "key1=value1,key2"}, true},
 	// deprecated cortexOrgID
 	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "cortexOrgID": "my-org"}, true},
+	// queryParameters
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "queryParameters": "key1=value1,key2=value2"}, false},
+	// queryParameters with wrong format
+	{map[string]string{"serverAddress": "http://localhost:9090", "metricName": "http_requests_total", "threshold": "100", "query": "up", "queryParameters": "key1=value1,key2"}, true},
 }
 
 var prometheusMetricIdentifiers = []prometheusMetricIdentifier{
@@ -115,7 +121,7 @@ var testPrometheusAuthMetadata = []prometheusAuthMetadataTestData{
 
 func TestPrometheusParseMetadata(t *testing.T) {
 	for _, testData := range testPromMetadata {
-		_, err := parsePrometheusMetadata(&ScalerConfig{TriggerMetadata: testData.metadata})
+		_, err := parsePrometheusMetadata(&scalersconfig.ScalerConfig{TriggerMetadata: testData.metadata})
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
 		}
@@ -127,7 +133,7 @@ func TestPrometheusParseMetadata(t *testing.T) {
 
 func TestPrometheusGetMetricSpecForScaling(t *testing.T) {
 	for _, testData := range prometheusMetricIdentifiers {
-		meta, err := parsePrometheusMetadata(&ScalerConfig{TriggerMetadata: testData.metadataTestData.metadata, ScalerIndex: testData.scalerIndex})
+		meta, err := parsePrometheusMetadata(&scalersconfig.ScalerConfig{TriggerMetadata: testData.metadataTestData.metadata, TriggerIndex: testData.triggerIndex})
 		if err != nil {
 			t.Fatal("Could not parse metadata:", err)
 		}
@@ -146,7 +152,7 @@ func TestPrometheusGetMetricSpecForScaling(t *testing.T) {
 
 func TestPrometheusScalerAuthParams(t *testing.T) {
 	for _, testData := range testPrometheusAuthMetadata {
-		meta, err := parsePrometheusMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams, PodIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.podIdentityProvider}})
+		meta, err := parsePrometheusMetadata(&scalersconfig.ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams, PodIdentity: kedav1alpha1.AuthPodIdentity{Provider: testData.podIdentityProvider}})
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -372,6 +378,49 @@ func TestPrometheusScalerCustomHeaders(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestPrometheusScalerExecutePromQueryParameters(t *testing.T) {
+	testData := prometheusQromQueryResultTestData{
+		name:             "no values",
+		bodyStr:          `{"data":{"result":[]}}`,
+		responseStatus:   http.StatusOK,
+		expectedValue:    0,
+		isError:          false,
+		ignoreNullValues: true,
+	}
+	queryParametersValue := map[string]string{
+		"first":  "foo",
+		"second": "bar",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		queryParameter := request.URL.Query()
+		time := time.Now().UTC().Format(time.RFC3339)
+		require.Equal(t, queryParameter.Get("time"), time)
+
+		for queryParameterName, queryParameterValue := range queryParametersValue {
+			require.Equal(t, queryParameter.Get(queryParameterName), queryParameterValue)
+		}
+
+		expectedPath := "/api/v1/query"
+		require.Equal(t, request.URL.Path, expectedPath)
+
+		writer.WriteHeader(testData.responseStatus)
+		if _, err := writer.Write([]byte(testData.bodyStr)); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	scaler := prometheusScaler{
+		metadata: &prometheusMetadata{
+			serverAddress:    server.URL,
+			queryParameters:  queryParametersValue,
+			ignoreNullValues: testData.ignoreNullValues,
+		},
+		httpClient: http.DefaultClient,
+	}
+	_, err := scaler.ExecutePromQuery(context.TODO())
+
+	assert.NoError(t, err)
+}
+
 func TestPrometheusScaler_ExecutePromQuery_WithGCPNativeAuthentication(t *testing.T) {
 	fakeGoogleOAuthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"token_type": "Bearer", "access_token": "fake_access_token"}`)
@@ -425,10 +474,10 @@ IisErx3ap2o99Zn+Yotv/TGZkS+lfMLdbcOBr8a57Q==
 	}
 
 	tests := map[string]struct {
-		config func(*testing.T, *ScalerConfig) *ScalerConfig
+		config func(*testing.T, *scalersconfig.ScalerConfig) *scalersconfig.ScalerConfig
 	}{
 		"using GCP workload identity": {
-			config: func(t *testing.T, config *ScalerConfig) *ScalerConfig {
+			config: func(t *testing.T, config *scalersconfig.ScalerConfig) *scalersconfig.ScalerConfig {
 				t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", fakeGCPCredsPath)
 				config.PodIdentity = kedav1alpha1.AuthPodIdentity{
 					Provider: kedav1alpha1.PodIdentityProviderGCP,
@@ -438,7 +487,7 @@ IisErx3ap2o99Zn+Yotv/TGZkS+lfMLdbcOBr8a57Q==
 		},
 
 		"with Google app credentials on auth params": {
-			config: func(t *testing.T, config *ScalerConfig) *ScalerConfig {
+			config: func(t *testing.T, config *scalersconfig.ScalerConfig) *scalersconfig.ScalerConfig {
 				config.AuthParams = map[string]string{
 					"GoogleApplicationCredentials": string(fakeGCPCredsJSON),
 				}
@@ -447,7 +496,7 @@ IisErx3ap2o99Zn+Yotv/TGZkS+lfMLdbcOBr8a57Q==
 		},
 
 		"with Google app credentials on envs": {
-			config: func(t *testing.T, config *ScalerConfig) *ScalerConfig {
+			config: func(t *testing.T, config *scalersconfig.ScalerConfig) *scalersconfig.ScalerConfig {
 				config.TriggerMetadata["credentialsFromEnv"] = "GCP_APP_CREDENTIALS"
 				config.ResolvedEnv = map[string]string{
 					"GCP_APP_CREDENTIALS": string(fakeGCPCredsJSON),
@@ -457,7 +506,7 @@ IisErx3ap2o99Zn+Yotv/TGZkS+lfMLdbcOBr8a57Q==
 		},
 
 		"with Google app credentials file on auth params": {
-			config: func(t *testing.T, config *ScalerConfig) *ScalerConfig {
+			config: func(t *testing.T, config *scalersconfig.ScalerConfig) *scalersconfig.ScalerConfig {
 				config.TriggerMetadata["credentialsFromEnvFile"] = "GCP_APP_CREDENTIALS"
 				config.ResolvedEnv = map[string]string{
 					"GCP_APP_CREDENTIALS": fakeGCPCredsPath,
@@ -472,7 +521,7 @@ IisErx3ap2o99Zn+Yotv/TGZkS+lfMLdbcOBr8a57Q==
 			server := newFakeServer(t)
 			defer server.Close()
 
-			baseConfig := &ScalerConfig{
+			baseConfig := &scalersconfig.ScalerConfig{
 				TriggerMetadata: map[string]string{
 					"serverAddress": server.URL + "/v1/projects/my-fake-project/location/global/prometheus",
 					"query":         "sum(rate(http_requests_total{instance=\"my-instance\"}[5m]))",

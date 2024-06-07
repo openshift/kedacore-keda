@@ -33,8 +33,6 @@ func TestRemoveAadPodIdentityComponents(t *testing.T) {
 	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall aad-pod-identity --namespace %s", AzureAdPodIdentityNamespace))
 	require.NoErrorf(t, err, "cannot uninstall aad pod identity webhook - %s", err)
 
-	KubeClient = GetKubernetesClient(t)
-
 	DeleteNamespace(t, AzureAdPodIdentityNamespace)
 }
 
@@ -45,8 +43,6 @@ func TestRemoveWorkloadIdentityComponents(t *testing.T) {
 
 	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall workload-identity-webhook --namespace %s", AzureWorkloadIdentityNamespace))
 	require.NoErrorf(t, err, "cannot uninstall workload identity webhook - %s", err)
-
-	KubeClient = GetKubernetesClient(t)
 
 	DeleteNamespace(t, AzureWorkloadIdentityNamespace)
 }
@@ -59,8 +55,6 @@ func TestRemoveAwsIdentityComponents(t *testing.T) {
 	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall aws-identity-webhook --namespace %s", AwsIdentityNamespace))
 	require.NoErrorf(t, err, "cannot uninstall workload identity webhook - %s", err)
 
-	KubeClient = GetKubernetesClient(t)
-
 	DeleteNamespace(t, AwsIdentityNamespace)
 }
 
@@ -71,9 +65,6 @@ func TestRemoveGcpIdentityComponents(t *testing.T) {
 
 	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall gcp-identity-webhook --namespace %s", GcpIdentityNamespace))
 	require.NoErrorf(t, err, "cannot uninstall workload identity webhook - %s", err)
-
-	KubeClient = GetKubernetesClient(t)
-
 	DeleteNamespace(t, GcpIdentityNamespace)
 }
 
@@ -82,8 +73,9 @@ func TestRemoveOpentelemetryComponents(t *testing.T) {
 		t.Skip("skipping uninstall of opentelemetry")
 	}
 
-	_, err := ExecuteCommand("helm uninstall opentelemetry-collector")
+	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall opentelemetry-collector --namespace %s", OpentelemetryNamespace))
 	require.NoErrorf(t, err, "cannot uninstall opentelemetry-collector - %s", err)
+	DeleteNamespace(t, OpentelemetryNamespace)
 }
 
 func TestRemoveCertManager(t *testing.T) {
@@ -93,9 +85,6 @@ func TestRemoveCertManager(t *testing.T) {
 
 	_, err := ExecuteCommand(fmt.Sprintf("helm uninstall cert-manager --namespace %s", CertManagerNamespace))
 	require.NoErrorf(t, err, "cannot uninstall cert-manager - %s", err)
-
-	KubeClient = GetKubernetesClient(t)
-
 	DeleteNamespace(t, CertManagerNamespace)
 }
 
@@ -112,8 +101,5 @@ func TestRemoveStrimzi(t *testing.T) {
 		StrimziNamespace,
 		StrimziChartName))
 	require.NoErrorf(t, err, "cannot uninstall strimzi - %s", err)
-
-	KubeClient = GetKubernetesClient(t)
-
 	DeleteNamespace(t, StrimziNamespace)
 }

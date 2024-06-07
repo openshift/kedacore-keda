@@ -18,6 +18,7 @@ import (
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	"github.com/kedacore/keda/v2/pkg/scalers/authentication"
+	"github.com/kedacore/keda/v2/pkg/scalers/scalersconfig"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
@@ -36,9 +37,9 @@ type pulsarMetadata struct {
 
 	pulsarAuth *authentication.AuthMeta
 
-	statsURL    string
-	metricName  string
-	scalerIndex int
+	statsURL     string
+	metricName   string
+	triggerIndex int
 }
 
 const (
@@ -96,7 +97,7 @@ type pulsarStats struct {
 }
 
 // NewPulsarScaler creates a new PulsarScaler
-func NewPulsarScaler(config *ScalerConfig) (Scaler, error) {
+func NewPulsarScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 	logger := InitializeLogger(config, "pulsar_scaler")
 	pulsarMetadata, err := parsePulsarMetadata(config, logger)
 	if err != nil {
@@ -132,7 +133,7 @@ func NewPulsarScaler(config *ScalerConfig) (Scaler, error) {
 	}, nil
 }
 
-func parsePulsarMetadata(config *ScalerConfig, logger logr.Logger) (pulsarMetadata, error) {
+func parsePulsarMetadata(config *scalersconfig.ScalerConfig, logger logr.Logger) (pulsarMetadata, error) {
 	meta := pulsarMetadata{}
 	switch {
 	case config.TriggerMetadata["adminURLFromEnv"] != "":
@@ -229,9 +230,16 @@ func parsePulsarMetadata(config *ScalerConfig, logger logr.Logger) (pulsarMetada
 		if auth.ClientSecret == "" {
 			auth.ClientSecret = time.Now().String()
 		}
+		if auth.EndpointParams == nil {
+			v, err := authentication.ParseEndpointParams(config.TriggerMetadata["EndpointParams"])
+			if err != nil {
+				return meta, fmt.Errorf("error parsing EndpointParams: %s", config.TriggerMetadata["EndpointParams"])
+			}
+			auth.EndpointParams = v
+		}
 	}
 	meta.pulsarAuth = auth
-	meta.scalerIndex = config.ScalerIndex
+	meta.triggerIndex = config.TriggerIndex
 	return meta, nil
 }
 
@@ -246,10 +254,11 @@ func (s *pulsarScaler) GetStats(ctx context.Context) (*pulsarStats, error) {
 	client := s.httpClient
 	if s.metadata.pulsarAuth != nil && s.metadata.pulsarAuth.EnableOAuth {
 		config := clientcredentials.Config{
-			ClientID:     s.metadata.pulsarAuth.ClientID,
-			ClientSecret: s.metadata.pulsarAuth.ClientSecret,
-			TokenURL:     s.metadata.pulsarAuth.OauthTokenURI,
-			Scopes:       s.metadata.pulsarAuth.Scopes,
+			ClientID:       s.metadata.pulsarAuth.ClientID,
+			ClientSecret:   s.metadata.pulsarAuth.ClientSecret,
+			TokenURL:       s.metadata.pulsarAuth.OauthTokenURI,
+			Scopes:         s.metadata.pulsarAuth.Scopes,
+			EndpointParams: s.metadata.pulsarAuth.EndpointParams,
 		}
 		client = config.Client(context.Background())
 	}
@@ -298,7 +307,7 @@ func (s *pulsarScaler) getMsgBackLog(ctx context.Context) (int64, bool, error) {
 	return v.Msgbacklog, found, nil
 }
 
-// GetGetMetricsAndActivityMetrics returns value for a supported metric and an error if there is a problem getting the metric
+// GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
 func (s *pulsarScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	msgBacklog, found, err := s.getMsgBackLog(ctx)
 	if err != nil {
@@ -319,7 +328,7 @@ func (s *pulsarScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec 
 
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
-			Name: GenerateMetricNameWithIndex(s.metadata.scalerIndex, kedautil.NormalizeString(s.metadata.metricName)),
+			Name: GenerateMetricNameWithIndex(s.metadata.triggerIndex, kedautil.NormalizeString(s.metadata.metricName)),
 		},
 		Target: v2.MetricTarget{
 			Type:         v2.AverageValueMetricType,
