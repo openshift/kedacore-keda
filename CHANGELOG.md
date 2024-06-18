@@ -93,6 +93,7 @@ New deprecation(s):
 - **GCP Scalers**: Properly close the connection during the scaler cleaning process ([#5448](https://github.com/kedacore/keda/issues/5448))
 - **GCP Scalers**: Restore previous time horizon to prevent querying issues ([#5429](https://github.com/kedacore/keda/issues/5429))
 - **Prometheus Scaler**: Fix for missing AWS region from metadata ([#5419](https://github.com/kedacore/keda/issues/5419))
+- **General**: Add --ca-dir flag to KEDA operator to specify directories with CA certificates for scalers to authenticate TLS connections (defaults to /custom/ca) ([#5860](https://github.com/kedacore/keda/issues/5860))
 
 ## v2.13.0
 
