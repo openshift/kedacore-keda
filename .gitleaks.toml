@@ -1,0 +1,12 @@
+[allowlist]
+  description = "Global Allowlist"
+
+  # Ignore based on any subset of the file path
+  paths = [
+    # Because of how keda works, almost every test has test credentials in them, it's not 
+    # feasible to tag every single one with "# notasecret" 
+    '''.*_test.go$''',
+  ]
+  # Ignore based on any subset of the line
+  regexes = [
+  ]
