@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -919,6 +918,7 @@ func testWebhookMetricValues(t *testing.T) {
 func testMetricServerMetrics(t *testing.T) {
 	families := fetchAndParsePrometheusMetrics(t, fmt.Sprintf("curl --insecure %s", kedaMetricsServerPrometheusURL))
 	checkMetricServerValues(t, families)
+	checkGRPCClientMetrics(t, families)
 }
 
 func testOperatorMetricValues(t *testing.T, kc *kubernetes.Clientset) {
@@ -927,6 +927,7 @@ func testOperatorMetricValues(t *testing.T, kc *kubernetes.Clientset) {
 
 	checkTriggerTotalValues(t, families, expectedTriggerTotals)
 	checkCRTotalValues(t, families, expectedCrTotals)
+	checkGRPCServerMetrics(t, families)
 	checkBuildInfo(t, families)
 }
 
@@ -940,13 +941,6 @@ func checkBuildInfo(t *testing.T, families map[string]*prommodel.MetricFamily) {
 	}
 
 	latestCommit := getLatestCommit(t)
-
-	// I haven't found a way to inject the actual value via CI yet, so for now just
-	// tolerate our "we build this in CI" dummy string
-	if _, ok := os.LookupEnv("OPENSHIFT_CI"); ok {
-		latestCommit = "dummy-ci-commit-value"
-	}
-
 	expected := map[string]string{
 		"git_commit": latestCommit,
 		"goos":       "linux",
@@ -1030,6 +1024,166 @@ func checkCRTotalValues(t *testing.T, families map[string]*prommodel.MetricFamil
 		assert.Equalf(t, expectedMetricValue, metricValue, "expected %f got %f for cr type %s & namespace %s",
 			expectedMetricValue, metricValue, crType, namespace)
 	}
+}
+
+func checkGRPCServerMetrics(t *testing.T, families map[string]*prommodel.MetricFamily) {
+	t.Log("--- testing grpc server metrics ---")
+
+	family, ok := families["keda_internal_metricsservice_grpc_server_handled_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_server_handled_total not available")
+		return
+	}
+
+	metricValue := 0.0
+	metrics := family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_server_handled_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_server_started_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_server_started_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_server_started_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_server_msg_received_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_server_msg_received_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_server_msg_received_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_server_msg_sent_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_server_msg_sent_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_server_msg_sent_total has to be greater than 0")
+}
+
+func checkGRPCClientMetrics(t *testing.T, families map[string]*prommodel.MetricFamily) {
+	t.Log("--- testing grpc client metrics ---")
+
+	family, ok := families["keda_internal_metricsservice_grpc_client_handled_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_client_handled_total not available")
+		return
+	}
+
+	metricValue := 0.0
+	metrics := family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_client_handled_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_client_started_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_client_started_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_client_started_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_client_msg_received_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_client_msg_received_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_client_msg_received_total has to be greater than 0")
+
+	family, ok = families["keda_internal_metricsservice_grpc_client_msg_sent_total"]
+	if !ok {
+		t.Errorf("metric keda_internal_metricsservice_grpc_client_msg_sent_total not available")
+		return
+	}
+
+	metricValue = 0.0
+	metrics = family.GetMetric()
+	for _, metric := range metrics {
+		labels := metric.GetLabel()
+		for _, label := range labels {
+			if *label.Name == namespaceString && *label.Value != testNamespace {
+				continue
+			}
+		}
+		metricValue += *metric.Counter.Value
+	}
+	assert.GreaterOrEqual(t, metricValue, 1.0, "keda_internal_metricsservice_grpc_client_msg_sent_total has to be greater than 0")
 }
 
 func checkWebhookValues(t *testing.T, families map[string]*prommodel.MetricFamily) {

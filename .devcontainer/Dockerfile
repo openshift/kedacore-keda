@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See https://go.microsoft.com/fwlink/?linkid=2090316 for license information.
 #-------------------------------------------------------------------------------------------------------------
 
-FROM golang:1.21.5
+FROM golang:1.21.9
 
 # Avoid warnings by switching to noninteractive
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,7 +37,6 @@ RUN apt-get update \
         github.com/ramya-rao-a/go-outline \
         github.com/acroca/go-symbols \
         github.com/godoctor/godoctor \
-        golang.org/x/tools/cmd/guru \
         golang.org/x/tools/cmd/gorename \
         github.com/rogpeppe/godef \
         github.com/zmb3/gogetdoc \

@@ -34,24 +34,19 @@ import (
 )
 
 var (
-	certCommonName  = "test-cert"
-	certCommonName2 = "test-cert2"
+	caCrtPath      = path.Join(customCAPath, "ca.crt")
+	certCommonName = "test-cert"
 )
 
 func TestCustomCAsAreRegistered(t *testing.T) {
-	customCAPath, err := os.MkdirTemp("", "test-ca-certdir-")
-	require.NoErrorf(t, err, "error creating temporary certs dir - %s", err)
-	defer os.RemoveAll(customCAPath)
-
-	generateCA(t, certCommonName, customCAPath)
-
-	SetCACertDirs([]string{customCAPath})
+	defer os.Remove(caCrtPath)
+	generateCA(t)
 
 	rootCAs := getRootCAs()
 	//nolint:staticcheck // func (s *CertPool) Subjects was deprecated if s was returned by SystemCertPool, Subjects
 	subjects := rootCAs.Subjects()
 	var rdnSequence pkix.RDNSequence
-	_, err = asn1.Unmarshal(subjects[len(subjects)-1], &rdnSequence)
+	_, err := asn1.Unmarshal(subjects[len(subjects)-1], &rdnSequence)
 	if err != nil {
 		t.Fatal("could not unmarshal der formatted subject")
 	}
@@ -61,41 +56,8 @@ func TestCustomCAsAreRegistered(t *testing.T) {
 	assert.Equal(t, certCommonName, name.CommonName, "certificate not found")
 }
 
-func TestMultipleCustomCADirs(t *testing.T) {
-	customCAPath, err := os.MkdirTemp("", "test-ca-certdir-")
-	require.NoErrorf(t, err, "error creating temporary certs dir - %s", err)
-	defer os.RemoveAll(customCAPath)
-	customCAPath2, err := os.MkdirTemp("", "test-ca-certdir2-")
-	require.NoErrorf(t, err, "error creating temporary certs dir - %s", err)
-	defer os.RemoveAll(customCAPath2)
-
-	generateCA(t, certCommonName, customCAPath)
-	generateCA(t, certCommonName2, customCAPath2)
-	SetCACertDirs([]string{customCAPath, customCAPath2})
-
-	rootCAs := getRootCAs()
-	//nolint:staticcheck // func (s *CertPool) Subjects was deprecated if s was returned by SystemCertPool, Subjects
-	subjects := rootCAs.Subjects()
-	var rdnSequence pkix.RDNSequence
-	for i := 0; i < 2; i++ {
-		_, err = asn1.Unmarshal(subjects[len(subjects)-1-i], &rdnSequence)
-		if err != nil {
-			t.Fatal("could not unmarshal der formatted subject")
-		}
-		var name pkix.Name
-		name.FillFromRDNSequence(&rdnSequence)
-
-		if i == 1 {
-			assert.Equal(t, certCommonName, name.CommonName, "certificate not found")
-		} else {
-			assert.Equal(t, certCommonName2, name.CommonName, "certificate not found")
-		}
-	}
-}
-
-func generateCA(t *testing.T, cn, dir string) {
-	err := os.MkdirAll(dir, os.ModePerm)
-	caCrtPath := path.Join(dir, "ca.crt")
+func generateCA(t *testing.T) {
+	err := os.MkdirAll(customCAPath, os.ModePerm)
 	require.NoErrorf(t, err, "error generating the custom ca folder - %s", err)
 
 	ca := &x509.Certificate{
@@ -107,7 +69,7 @@ func generateCA(t *testing.T, cn, dir string) {
 			Locality:      []string{"San Francisco"},
 			StreetAddress: []string{"Golden Gate Bridge"},
 			PostalCode:    []string{"94016"},
-			CommonName:    cn,
+			CommonName:    certCommonName,
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().AddDate(10, 0, 0),

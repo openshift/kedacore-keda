@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	_ "go.uber.org/automaxprocs"
 	appsv1 "k8s.io/api/apps/v1"
@@ -53,15 +55,19 @@ type Adapter struct {
 	Message string
 }
 
+// https://github.com/kedacore/keda/issues/5732
+//
+//nolint:staticcheck // SA1019: klogr.New is deprecated.
 var logger = klogr.New().WithName("keda_metrics_adapter")
 
 var (
-	adapterClientRequestQPS   float32
-	adapterClientRequestBurst int
-	metricsAPIServerPort      int
-	disableCompression        bool
-	metricsServiceAddr        string
-	profilingAddr             string
+	adapterClientRequestQPS     float32
+	adapterClientRequestBurst   int
+	metricsAPIServerPort        int
+	disableCompression          bool
+	metricsServiceAddr          string
+	profilingAddr               string
+	metricsServiceGRPCAuthority string
 )
 
 func (a *Adapter) makeProvider(ctx context.Context) (provider.ExternalMetricsProvider, <-chan struct{}, error) {
@@ -104,6 +110,8 @@ func (a *Adapter) makeProvider(ctx context.Context) (provider.ExternalMetricsPro
 	cfg.Burst = adapterClientRequestBurst
 	cfg.DisableCompression = disableCompression
 
+	clientMetrics := getMetricInterceptor()
+
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Metrics: server.Options{
 			BindAddress: "0", // disabled since we use our own server to serve metrics
@@ -123,7 +131,7 @@ func (a *Adapter) makeProvider(ctx context.Context) (provider.ExternalMetricsPro
 	}
 
 	logger.Info("Connecting Metrics Service gRPC client to the server", "address", metricsServiceAddr)
-	grpcClient, err := metricsservice.NewGrpcClient(metricsServiceAddr, a.SecureServing.ServerCert.CertDirectory)
+	grpcClient, err := metricsservice.NewGrpcClient(metricsServiceAddr, a.SecureServing.ServerCert.CertDirectory, metricsServiceGRPCAuthority, clientMetrics)
 	if err != nil {
 		logger.Error(err, "error connecting Metrics Service gRPC client to the server", "address", metricsServiceAddr)
 		return nil, nil, err
@@ -155,6 +163,30 @@ func getMetricHandler() http.HandlerFunc {
 
 		kubemetrics.HandlerFor(ctrlmetrics.Registry, kubemetrics.HandlerOpts{}).ServeHTTP(w, req)
 	}
+}
+
+// getMetricInterceptor returns a metrics inceptor that records metrics between the adapter and opertaor
+func getMetricInterceptor() *grpcprom.ClientMetrics {
+	metricsNamespace := "keda_internal_metricsservice"
+
+	counterNamespace := func(o *prometheus.CounterOpts) {
+		o.Namespace = metricsNamespace
+	}
+
+	histogramNamespace := func(o *prometheus.HistogramOpts) {
+		o.Namespace = metricsNamespace
+	}
+
+	clientMetrics := grpcprom.NewClientMetrics(
+		grpcprom.WithClientHandlingTimeHistogram(
+			grpcprom.WithHistogramBuckets([]float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120}),
+			histogramNamespace,
+		),
+		grpcprom.WithClientCounterOptions(counterNamespace),
+	)
+	legacyregistry.Registerer().MustRegister(clientMetrics)
+
+	return clientMetrics
 }
 
 // RunMetricsServer runs a http listener and handles the /metrics endpoint
@@ -232,7 +264,8 @@ func main() {
 	cmd.Flags().StringVar(&cmd.Message, "msg", "starting adapter...", "startup message")
 	cmd.Flags().AddGoFlagSet(flag.CommandLine) // make sure we get the klog flags
 	cmd.Flags().IntVar(&metricsAPIServerPort, "port", 8080, "Set the port for the metrics API server")
-	cmd.Flags().StringVar(&metricsServiceAddr, "metrics-service-address", generateDefaultMetricsServiceAddr(), "The address of the gRPRC Metrics Service Server.")
+	cmd.Flags().StringVar(&metricsServiceAddr, "metrics-service-address", generateDefaultMetricsServiceAddr(), "The address of the GRPC Metrics Service Server.")
+	cmd.Flags().StringVar(&metricsServiceGRPCAuthority, "metrics-service-grpc-authority", "", "Host Authority override for the Metrics Service if the Host Authority is not the same as the address used for the GRPC Metrics Service Server.")
 	cmd.Flags().StringVar(&profilingAddr, "profiling-bind-address", "", "The address the profiling would be exposed on.")
 	cmd.Flags().Float32Var(&adapterClientRequestQPS, "kube-api-qps", 20.0, "Set the QPS rate for throttling requests sent to the apiserver")
 	cmd.Flags().IntVar(&adapterClientRequestBurst, "kube-api-burst", 30, "Set the burst for throttling requests sent to the apiserver")

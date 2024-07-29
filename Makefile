@@ -6,7 +6,7 @@ SHELL           = /bin/bash
 # If E2E_IMAGE_TAG is defined, we are on pr e2e test and we have to use the new tag and append -test to the repository
 ifeq '${E2E_IMAGE_TAG}' ''
 VERSION ?= main
-# SUFIX here is intentional empty to not append nothing to the repository
+# SUFFIX here is intentional empty to not append nothing to the repository
 SUFFIX =
 endif
 
@@ -18,9 +18,9 @@ endif
 IMAGE_REGISTRY ?= ghcr.io
 IMAGE_REPO     ?= kedacore
 
-IMAGE_CONTROLLER ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
-IMAGE_ADAPTER    ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
-IMAGE_WEBHOOKS   ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-admission-webhooks$(SUFFIX):$(VERSION)
+IMAGE_CONTROLLER = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda$(SUFFIX):$(VERSION)
+IMAGE_ADAPTER    = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-metrics-apiserver$(SUFFIX):$(VERSION)
+IMAGE_WEBHOOKS   = $(IMAGE_REGISTRY)/$(IMAGE_REPO)/keda-admission-webhooks$(SUFFIX):$(VERSION)
 
 ARCH       ?=amd64
 CGO        ?=0
@@ -116,28 +116,6 @@ e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
 e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e2e
 	kubectl delete ns -l type=e2e
 
-# The OpenShift tests are split into 3 targets because when we test the CMA operator, 
-# we want to do the setup and cleanup with the operator, but still run the test suite
-# from the test image, so we need that granularity. 
-.PHONY: e2e-test-openshift-setup
-e2e-test-openshift-setup: ## Setup the tests for OpenShift
-	@echo "--- Performing Setup ---"
-	cd tests; go test -v -timeout 15m -tags e2e ./utils/setup_test.go 
-
-.PHONY: e2e-test-openshift
-e2e-test-openshift: ## Run tests for OpenShift
-	@echo "--- Running Internal Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca)
-	@echo "--- Running Scaler Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/...
-	@echo "--- Running Sequential Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./sequential/...
-
-.PHONY: e2e-test-openshift-clean
-e2e-test-openshift-clean: ## Cleanup the test environment for OpenShift
-	@echo "--- Cleaning Up ---"
-	cd tests; go test -v -timeout 60m -tags e2e ./utils/cleanup_test.go
-
 .PHONY: smoke-test
 smoke-test: ## Run e2e tests against Kubernetes cluster configured in ~/.kube/config.
 	./tests/run-smoke-tests.sh
@@ -163,17 +141,6 @@ fmt: ## Run go fmt against code.
 
 vet: ## Run go vet against code.
 	go vet ./...
-
-tooldeps: ## Update tooldeps
-	hack/tooldeps/update.sh
-
-tooldeps-check: ## Check whether tooldeps are out of date
-	rm -rf hack/tooldeps-check
-	cp -a hack/tooldeps hack/tooldeps-check
-	hack/tooldeps-check/update.sh
-	diff -uNr hack/tooldeps hack/tooldeps-check || { echo "tooldeps are out of date. Run 'make tooldeps' to correct"; rm -rf hack/tooldeps-check; false; }
-	rm -rf hack/tooldeps-check
-	echo "tooldeps are current"
 
 golangci: ## Run golangci against code.
 	golangci-lint run
@@ -221,7 +188,11 @@ pkg/scalers/liiklus/mocks/mock_liiklus.go:
 
 ##@ Build
 
-build: generate fmt vet manager adapter webhooks ## Build Operator (manager), Metrics Server (adapter) and Admision Web Hooks (webhooks) binaries.
+build: update-mod generate fmt vet manager adapter webhooks ## Build Operator (manager), Metrics Server (adapter) and Admision Web Hooks (webhooks) binaries.
+
+update-mod:
+	go mod tidy
+	go mod vendor
 
 manager: generate
 	${GO_BUILD_VARS} go build -ldflags $(GO_LDFLAGS) -mod=vendor -o bin/keda cmd/operator/main.go
@@ -370,7 +341,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: mockgen
 mockgen: $(MOCKGEN) ## Install mockgen from vendor dir if necessary.
 $(MOCKGEN): $(LOCALBIN)
-	test -s $(LOCALBIN)/mockgen || GOBIN=$(LOCALBIN) go install github.com/golang/mock/mockgen
+	test -s $(LOCALBIN)/mockgen || GOBIN=$(LOCALBIN) go install go.uber.org/mock/mockgen
 
 .PHONY: protoc-gen
 protoc-gen: $(PROTOCGEN) $(PROTOCGEN_GRPC) ## Install protoc-gen from vendor dir if necessary.
