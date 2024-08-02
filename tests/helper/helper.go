@@ -87,7 +87,10 @@ var (
 	InstallKafka                  = os.Getenv("E2E_INSTALL_KAFKA")
 	// As this isn't supported anymore after 2.15, we need to skip the check on v2.14
 	// to execute the installation
-	AzureRunAadPodIdentityTests = "true"
+	// TODO(jkyros): This will drop out once these tests get obsoleted by https://github.com/kedacore/keda/pull/5782,
+	// they took the config variable out upstream, but we would have disabled it anyway, so I'm just explicitly disabling
+	// it here until it goes away.
+	AzureRunAadPodIdentityTests = "false"
 )
 
 var (
