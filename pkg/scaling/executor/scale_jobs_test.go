@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -316,8 +316,11 @@ func TestCreateJobs(t *testing.T) {
 
 func TestGenerateJobs(t *testing.T) {
 	var (
-		expectedAnnotations = map[string]string{"test": "test"}
-		expectedLabels      = map[string]string{
+		expectedAnnotations = map[string]string{
+			"test":                         "test",
+			"scaledjob.keda.sh/generation": "0",
+		}
+		expectedLabels = map[string]string{
 			"app.kubernetes.io/managed-by": "keda-operator",
 			"app.kubernetes.io/name":       "test",
 			"app.kubernetes.io/part-of":    "test",

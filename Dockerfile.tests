@@ -1,7 +1,7 @@
  # This dockerfile is intended to build something approximating the upstream test 
  # image, but for use in OpenShift CI. Upstream keda bumps the keda-tools image version 
  # when they feel like it, so we might just need to pay attention when we do releases. 
- FROM ghcr.io/kedacore/keda-tools:1.20.5
+ FROM ghcr.io/kedacore/keda-tools:1.22.5
  COPY . /src
  RUN chmod 777 -R /src
  WORKDIR /src

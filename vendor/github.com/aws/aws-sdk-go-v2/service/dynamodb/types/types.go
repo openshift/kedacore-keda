@@ -28,7 +28,7 @@ type ArchivalSummary struct {
 	noSmithyDocumentSerde
 }
 
-// Represents an attribute for describing the key schema for the table and indexes.
+// Represents an attribute for describing the schema for the table and indexes.
 type AttributeDefinition struct {
 
 	// A name for the attribute.
@@ -729,7 +729,8 @@ type ConditionCheck struct {
 	// This member is required.
 	Key map[string]AttributeValue
 
-	// Name of the table for the check item request.
+	// Name of the table for the check item request. You can also provide the Amazon
+	// Resource Name (ARN) of the table in this parameter.
 	//
 	// This member is required.
 	TableName *string
@@ -775,7 +776,9 @@ type ConsumedCapacity struct {
 	// The amount of throughput consumed on the table affected by the operation.
 	Table *Capacity
 
-	// The name of the table that was affected by the operation.
+	// The name of the table that was affected by the operation. If you had specified
+	// the Amazon Resource Name (ARN) of a table in the input, you'll see the table ARN
+	// in the response.
 	TableName *string
 
 	// The total number of write capacity units consumed by the operation.
@@ -907,7 +910,8 @@ type Delete struct {
 	// This member is required.
 	Key map[string]AttributeValue
 
-	// Name of the table in which the item to be deleted resides.
+	// Name of the table in which the item to be deleted resides. You can also provide
+	// the Amazon Resource Name (ARN) of the table in this parameter.
 	//
 	// This member is required.
 	TableName *string
@@ -971,6 +975,16 @@ type DeleteRequest struct {
 	//
 	// This member is required.
 	Key map[string]AttributeValue
+
+	noSmithyDocumentSerde
+}
+
+// Enables setting the configuration for Kinesis Streaming.
+type EnableKinesisStreamingConfiguration struct {
+
+	// Toggle for the precision of Kinesis data stream timestamp. The values are
+	// either MILLISECOND or MICROSECOND .
+	ApproximateCreationDateTimePrecision ApproximateCreationDateTimePrecision
 
 	noSmithyDocumentSerde
 }
@@ -1260,7 +1274,8 @@ type Get struct {
 	// This member is required.
 	Key map[string]AttributeValue
 
-	// The name of the table from which to retrieve the specified item.
+	// The name of the table from which to retrieve the specified item. You can also
+	// provide the Amazon Resource Name (ARN) of the table in this parameter.
 	//
 	// This member is required.
 	TableName *string
@@ -1775,6 +1790,10 @@ type KeySchemaElement struct {
 // Describes a Kinesis data stream destination.
 type KinesisDataStreamDestination struct {
 
+	// The precision of the Kinesis data stream timestamp. The values are either
+	// MILLISECOND or MICROSECOND .
+	ApproximateCreationDateTimePrecision ApproximateCreationDateTimePrecision
+
 	// The current status of replication.
 	DestinationStatus DestinationStatus
 
@@ -1886,10 +1905,10 @@ type LocalSecondaryIndexInfo struct {
 	noSmithyDocumentSerde
 }
 
-// Represents a PartiQL statment that uses parameters.
+// Represents a PartiQL statement that uses parameters.
 type ParameterizedStatement struct {
 
-	// A PartiQL statment that uses parameters.
+	// A PartiQL statement that uses parameters.
 	//
 	// This member is required.
 	Statement *string
@@ -1954,6 +1973,7 @@ type Projection struct {
 	//   - INCLUDE - In addition to the attributes described in KEYS_ONLY , the
 	//   secondary index will include other non-key attributes that you specify.
 	//   - ALL - All of the table attributes are projected into the index.
+	// When using the DynamoDB console, ALL is selected by default.
 	ProjectionType ProjectionType
 
 	noSmithyDocumentSerde
@@ -2039,7 +2059,8 @@ type Put struct {
 	// This member is required.
 	Item map[string]AttributeValue
 
-	// Name of the table in which to write the item.
+	// Name of the table in which to write the item. You can also provide the Amazon
+	// Resource Name (ARN) of the table in this parameter.
 	//
 	// This member is required.
 	TableName *string
@@ -2968,7 +2989,8 @@ type Update struct {
 	// This member is required.
 	Key map[string]AttributeValue
 
-	// Name of the table for the UpdateItem request.
+	// Name of the table for the UpdateItem request. You can also provide the Amazon
+	// Resource Name (ARN) of the table in this parameter.
 	//
 	// This member is required.
 	TableName *string
@@ -3012,6 +3034,15 @@ type UpdateGlobalSecondaryIndexAction struct {
 	//
 	// This member is required.
 	ProvisionedThroughput *ProvisionedThroughput
+
+	noSmithyDocumentSerde
+}
+
+// Enables updating the configuration for Kinesis Streaming.
+type UpdateKinesisStreamingConfiguration struct {
+
+	// Enables updating the precision of Kinesis data stream timestamp.
+	ApproximateCreationDateTimePrecision ApproximateCreationDateTimePrecision
 
 	noSmithyDocumentSerde
 }

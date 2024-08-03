@@ -6,7 +6,7 @@ SHELL           = /bin/bash
 # If E2E_IMAGE_TAG is defined, we are on pr e2e test and we have to use the new tag and append -test to the repository
 ifeq '${E2E_IMAGE_TAG}' ''
 VERSION ?= main
-# SUFIX here is intentional empty to not append nothing to the repository
+# SUFFIX here is intentional empty to not append nothing to the repository
 SUFFIX =
 endif
 
@@ -97,6 +97,10 @@ scale-node-pool: az-login ## Scale nodepool.
 		--subscription $(TF_AZURE_SUBSCRIPTION) \
 		--resource-group $(TF_AZURE_RESOURCE_GROUP) \
 		--node-count $(NODE_POOL_SIZE)
+
+.PHONY: e2e-regex-check
+e2e-regex-check:
+	go run -tags e2e ./tests/run-all.go regex-check
 
 .PHONY: e2e-test
 e2e-test: get-cluster-context ## Run e2e tests against Azure cluster.
@@ -221,7 +225,11 @@ pkg/scalers/liiklus/mocks/mock_liiklus.go:
 
 ##@ Build
 
-build: generate fmt vet manager adapter webhooks ## Build Operator (manager), Metrics Server (adapter) and Admision Web Hooks (webhooks) binaries.
+build: update-mod generate fmt vet manager adapter webhooks ## Build Operator (manager), Metrics Server (adapter) and Admision Web Hooks (webhooks) binaries.
+
+update-mod:
+	go mod tidy
+	go mod vendor
 
 manager: generate
 	${GO_BUILD_VARS} go build -ldflags $(GO_LDFLAGS) -mod=vendor -o bin/keda cmd/operator/main.go
@@ -297,7 +305,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: install ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && \
 	$(KUSTOMIZE) edit set image ghcr.io/kedacore/keda=${IMAGE_CONTROLLER} && \
-	if [ "$(AZURE_RUN_AAD_POD_IDENTITY_TESTS)" = true ]; then \
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
 		$(KUSTOMIZE) edit add label --force aadpodidbinding:keda; \
 	fi && \
 	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
@@ -305,7 +313,7 @@ deploy: install ## Deploy controller to the K8s cluster specified in ~/.kube/con
 	fi
 	cd config/metrics-server && \
     $(KUSTOMIZE) edit set image ghcr.io/kedacore/keda-metrics-apiserver=${IMAGE_ADAPTER} && \
-	if [ "$(AZURE_RUN_AAD_POD_IDENTITY_TESTS)" = true ]; then \
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
 		$(KUSTOMIZE) edit add label --force aadpodidbinding:keda; \
 	fi
 	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
@@ -370,7 +378,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: mockgen
 mockgen: $(MOCKGEN) ## Install mockgen from vendor dir if necessary.
 $(MOCKGEN): $(LOCALBIN)
-	test -s $(LOCALBIN)/mockgen || GOBIN=$(LOCALBIN) go install github.com/golang/mock/mockgen
+	test -s $(LOCALBIN)/mockgen || GOBIN=$(LOCALBIN) go install go.uber.org/mock/mockgen
 
 .PHONY: protoc-gen
 protoc-gen: $(PROTOCGEN) $(PROTOCGEN_GRPC) ## Install protoc-gen from vendor dir if necessary.

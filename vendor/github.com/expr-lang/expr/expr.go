@@ -42,7 +42,13 @@ func AllowUndefinedVariables() Option {
 // Operator allows to replace a binary operator with a function.
 func Operator(operator string, fn ...string) Option {
 	return func(c *conf.Config) {
-		c.Operator(operator, fn...)
+		p := &patcher.OperatorOverloading{
+			Operator:  operator,
+			Overloads: fn,
+			Types:     c.Types,
+			Functions: c.Functions,
+		}
+		c.Visitors = append(c.Visitors, p)
 	}
 }
 
@@ -65,6 +71,7 @@ func AsAny() Option {
 func AsKind(kind reflect.Kind) Option {
 	return func(c *conf.Config) {
 		c.Expect = kind
+		c.ExpectAny = true
 	}
 }
 
@@ -72,6 +79,7 @@ func AsKind(kind reflect.Kind) Option {
 func AsBool() Option {
 	return func(c *conf.Config) {
 		c.Expect = reflect.Bool
+		c.ExpectAny = true
 	}
 }
 
@@ -79,6 +87,7 @@ func AsBool() Option {
 func AsInt() Option {
 	return func(c *conf.Config) {
 		c.Expect = reflect.Int
+		c.ExpectAny = true
 	}
 }
 
@@ -86,6 +95,7 @@ func AsInt() Option {
 func AsInt64() Option {
 	return func(c *conf.Config) {
 		c.Expect = reflect.Int64
+		c.ExpectAny = true
 	}
 }
 
@@ -93,6 +103,17 @@ func AsInt64() Option {
 func AsFloat64() Option {
 	return func(c *conf.Config) {
 		c.Expect = reflect.Float64
+		c.ExpectAny = true
+	}
+}
+
+// WarnOnAny tells the compiler to warn if expression return any type.
+func WarnOnAny() Option {
+	return func(c *conf.Config) {
+		if c.Expect == reflect.Invalid {
+			panic("WarnOnAny() works only with combination with AsInt(), AsBool(), etc. options")
+		}
+		c.ExpectAny = false
 	}
 }
 
@@ -173,24 +194,30 @@ func Compile(input string, ops ...Option) (*vm.Program, error) {
 	}
 	config.Check()
 
-	if len(config.Operators) > 0 {
-		config.Visitors = append(config.Visitors, &conf.OperatorPatcher{
-			Operators: config.Operators,
-			Types:     config.Types,
-		})
-	}
-
 	tree, err := parser.ParseWithConfig(input, config)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(config.Visitors) > 0 {
-		for _, v := range config.Visitors {
-			// We need to perform types check, because some visitors may rely on
-			// types information available in the tree.
-			_, _ = checker.Check(tree, config)
-			ast.Walk(&tree.Node, v)
+		for i := 0; i < 1000; i++ {
+			more := false
+			for _, v := range config.Visitors {
+				// We need to perform types check, because some visitors may rely on
+				// types information available in the tree.
+				_, _ = checker.Check(tree, config)
+
+				ast.Walk(&tree.Node, v)
+
+				if v, ok := v.(interface {
+					ShouldRepeat() bool
+				}); ok {
+					more = more || v.ShouldRepeat()
+				}
+			}
+			if !more {
+				break
+			}
 		}
 	}
 	_, err = checker.Check(tree, config)

@@ -158,6 +158,44 @@ var _ = It("shouldn't validate the so creation when the replica counts are wrong
 	}).Should(HaveOccurred())
 })
 
+var _ = It("shouldn't validate the so creation when the fallback is wrong", func() {
+	namespaceName := "wrong-fallback"
+	namespace := createNamespace(namespaceName)
+
+	so := createScaledObject(soName, namespaceName, workloadName, "apps/v1", "Deployment", false, map[string]string{}, "")
+	so.Spec.Fallback = &Fallback{
+		FailureThreshold: -1,
+		Replicas:         -3,
+	}
+
+	err := k8sClient.Create(context.Background(), namespace)
+	Expect(err).ToNot(HaveOccurred())
+
+	Eventually(func() error {
+		return k8sClient.Create(context.Background(), so)
+	}).Should(HaveOccurred())
+})
+
+var _ = It("shouldn't validate the so creation When the fallback are configured and the scaler is either CPU or memory.", func() {
+	namespaceName := "wrong-fallback-cpu-memory"
+	namespace := createNamespace(namespaceName)
+	workload := createDeployment(namespaceName, true, true)
+	so := createScaledObject(soName, namespaceName, workloadName, "apps/v1", "Deployment", true, map[string]string{}, "")
+	so.Spec.Fallback = &Fallback{
+		FailureThreshold: 3,
+		Replicas:         6,
+	}
+	err := k8sClient.Create(context.Background(), namespace)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = k8sClient.Create(context.Background(), workload)
+	Expect(err).ToNot(HaveOccurred())
+
+	Eventually(func() error {
+		return k8sClient.Create(context.Background(), so)
+	}).Should(HaveOccurred())
+})
+
 var _ = It("shouldn't validate the so creation when there is another unmanaged hpa and so has transfer-hpa-ownership activated", func() {
 
 	hpaName := "test-unmanaged-hpa-ownership"
@@ -165,6 +203,26 @@ var _ = It("shouldn't validate the so creation when there is another unmanaged h
 	namespace := createNamespace(namespaceName)
 	hpa := createHpa(hpaName, namespaceName, workloadName, "apps/v1", "Deployment", nil)
 	so := createScaledObject(soName, namespaceName, workloadName, "apps/v1", "Deployment", false, map[string]string{ScaledObjectTransferHpaOwnershipAnnotation: "true"}, hpaName)
+
+	err := k8sClient.Create(context.Background(), namespace)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = k8sClient.Create(context.Background(), hpa)
+	Expect(err).ToNot(HaveOccurred())
+
+	Eventually(func() error {
+		return k8sClient.Create(context.Background(), so)
+	}).ShouldNot(HaveOccurred())
+})
+
+var _ = It("shouldn't validate the so creation when hpa has shared-ownership unactivated", func() {
+
+	hpaName := "test-hpa-disabled-validation-by-hpa-ownership"
+	namespaceName := "hpa-ownership"
+	namespace := createNamespace(namespaceName)
+	hpa := createHpa(hpaName, namespaceName, workloadName, "apps/v1", "Deployment", nil)
+	hpa.ObjectMeta.Annotations = map[string]string{ValidationsHpaOwnershipAnnotation: "false"}
+	so := createScaledObject(soName, namespaceName, workloadName, "apps/v1", "Deployment", false, map[string]string{ScaledObjectTransferHpaOwnershipAnnotation: "false"}, hpaName)
 
 	err := k8sClient.Create(context.Background(), namespace)
 	Expect(err).ToNot(HaveOccurred())
@@ -581,6 +639,30 @@ var _ = It("shouldn't create so when stabilizationWindowSeconds exceeds 3600", f
 	}).
 		WithTimeout(5 * time.Second).
 		Should(HaveOccurred())
+})
+
+var _ = It("should validate empty triggers in ScaledObject", func() {
+
+	namespaceName := "empty-triggers-set"
+	namespace := createNamespace(namespaceName)
+
+	err := k8sClient.Create(context.Background(), namespace)
+	Expect(err).ToNot(HaveOccurred())
+
+	workload := createDeployment(namespaceName, false, false)
+	workload.Spec.Template.Spec.Containers[0].Resources.Limits = v1.ResourceList{
+		v1.ResourceCPU: *resource.NewMilliQuantity(100, resource.DecimalSI),
+	}
+
+	err = k8sClient.Create(context.Background(), workload)
+	Expect(err).ToNot(HaveOccurred())
+
+	so := createScaledObject(soName, namespaceName, workloadName, "apps/v1", "Deployment", false, map[string]string{}, "")
+	so.Spec.Triggers = []ScaleTriggers{}
+
+	Eventually(func() error {
+		return k8sClient.Create(context.Background(), so)
+	}).Should(HaveOccurred())
 })
 
 // ============================ SCALING MODIFIERS ============================ \\

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -34,6 +35,9 @@ type mongoDBMetadata struct {
 	// The string is used by connected with mongoDB.
 	// +optional
 	connectionString string
+	// Specify the prefix to connect to the mongoDB server, default value `mongodb`, if the connectionString be provided, don't need to specify this param.
+	// +optional
+	scheme string
 	// Specify the host to connect to the mongoDB server,if the connectionString be provided, don't need to specify this param.
 	// +optional
 	host string
@@ -162,17 +166,26 @@ func parseMongoDBMetadata(config *scalersconfig.ScalerConfig) (*mongoDBMetadata,
 		meta.connectionString = config.ResolvedEnv[config.TriggerMetadata["connectionStringFromEnv"]]
 	default:
 		meta.connectionString = ""
+		scheme, err := GetFromAuthOrMeta(config, "scheme")
+		if err != nil {
+			meta.scheme = "mongodb"
+		} else {
+			meta.scheme = scheme
+		}
+
 		host, err := GetFromAuthOrMeta(config, "host")
 		if err != nil {
 			return nil, "", err
 		}
 		meta.host = host
 
-		port, err := GetFromAuthOrMeta(config, "port")
-		if err != nil {
-			return nil, "", err
+		if !strings.Contains(scheme, "mongodb+srv") {
+			port, err := GetFromAuthOrMeta(config, "port")
+			if err != nil {
+				return nil, "", err
+			}
+			meta.port = port
 		}
-		meta.port = port
 
 		username, err := GetFromAuthOrMeta(config, "username")
 		if err != nil {
@@ -190,14 +203,18 @@ func parseMongoDBMetadata(config *scalersconfig.ScalerConfig) (*mongoDBMetadata,
 		}
 	}
 
-	if meta.connectionString != "" {
+	switch {
+	case meta.connectionString != "":
 		connStr = meta.connectionString
-	} else {
-		// Build connection str
+	case meta.scheme == "mongodb+srv":
+		// nosemgrep: db-connection-string
+		connStr = fmt.Sprintf("%s://%s:%s@%s/%s", meta.scheme, url.QueryEscape(meta.username), url.QueryEscape(meta.password), meta.host, meta.dbName)
+	default:
 		addr := net.JoinHostPort(meta.host, meta.port)
 		// nosemgrep: db-connection-string
-		connStr = fmt.Sprintf("mongodb://%s:%s@%s/%s", url.QueryEscape(meta.username), url.QueryEscape(meta.password), addr, meta.dbName)
+		connStr = fmt.Sprintf("%s://%s:%s@%s/%s", meta.scheme, url.QueryEscape(meta.username), url.QueryEscape(meta.password), addr, meta.dbName)
 	}
+
 	meta.triggerIndex = config.TriggerIndex
 	return &meta, connStr, nil
 }

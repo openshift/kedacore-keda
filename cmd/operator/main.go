@@ -195,7 +195,6 @@ func main() {
 
 	globalHTTPTimeout := time.Duration(globalHTTPTimeoutMS) * time.Millisecond
 	eventRecorder := mgr.GetEventRecorderFor("keda-operator")
-	eventEmitter := eventemitter.NewEventEmitter(mgr.GetClient(), eventRecorder, k8sClusterName)
 
 	kubeClientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
@@ -219,6 +218,7 @@ func main() {
 	}
 
 	scaledHandler := scaling.NewScaleHandler(mgr.GetClient(), scaleClient, mgr.GetScheme(), globalHTTPTimeout, eventRecorder, secretInformer.Lister())
+	eventEmitter := eventemitter.NewEventEmitter(mgr.GetClient(), eventRecorder, k8sClusterName, secretInformer.Lister())
 
 	if err = (&kedacontrollers.ScaledObjectReconciler{
 		Client:       mgr.GetClient(),
