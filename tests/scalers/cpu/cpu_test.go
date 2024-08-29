@@ -71,13 +71,6 @@ spec:
           requests:
             cpu: 200m
         imagePullPolicy: IfNotPresent
-        securityContext:
-          privileged: true
-          runAsNonRoot: false
-          readOnlyRootFilesystem: false
-          capabilities:
-            drop:
-            - ALL
 `
 
 	serviceTemplate = `apiVersion: v1

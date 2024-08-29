@@ -72,13 +72,6 @@ spec:
           requests:
             memory: 50Mi
         imagePullPolicy: IfNotPresent
-        securityContext:
-          privileged: true
-          runAsNonRoot: false
-          readOnlyRootFilesystem: false
-          capabilities:
-            drop:
-            - ALL
 `
 
 	scaledObjectTemplate = `
@@ -160,15 +153,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: 'nginxinc/nginx-unprivileged'
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop:
-              - ALL
-            seccompProfile:
-              type: RuntimeDefault`
+          image: 'nginxinc/nginx-unprivileged'`
 
 	scaleUpValue   = 1
 	scaleDownValue = 45
