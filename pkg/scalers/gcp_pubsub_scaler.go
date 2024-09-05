@@ -48,6 +48,8 @@ type pubsubMetadata struct {
 	gcpAuthorization *gcp.AuthorizationMetadata
 	triggerIndex     int
 	aggregation      string
+	timeHorizon      string
+	valueIfNull      *float64
 }
 
 // NewPubSubScaler creates a new pubsubScaler
@@ -178,7 +180,17 @@ func parsePubSubMetadata(config *scalersconfig.ScalerConfig, logger logr.Logger)
 		}
 	}
 
+	if val, ok := config.TriggerMetadata["valueIfNull"]; ok && val != "" {
+		valueIfNull, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return nil, fmt.Errorf("valueIfNull parsing error %w", err)
+		}
+		meta.valueIfNull = &valueIfNull
+	}
+
 	meta.aggregation = config.TriggerMetadata["aggregation"]
+
+	meta.timeHorizon = config.TriggerMetadata["timeHorizon"]
 
 	err := parsePubSubResourceConfig(config, &meta)
 	if err != nil {
@@ -280,7 +292,7 @@ func (s *pubsubScaler) getMetrics(ctx context.Context, metricType string) (float
 	}
 	resourceID, projectID := getResourceData(s)
 	query, err := s.client.BuildMQLQuery(
-		projectID, s.metadata.resourceType, metricType, resourceID, s.metadata.aggregation,
+		projectID, s.metadata.resourceType, metricType, resourceID, s.metadata.aggregation, s.metadata.timeHorizon,
 	)
 	if err != nil {
 		return -1, err
@@ -288,7 +300,7 @@ func (s *pubsubScaler) getMetrics(ctx context.Context, metricType string) (float
 
 	// Pubsub metrics are collected every 60 seconds so no need to aggregate them.
 	// See: https://cloud.google.com/monitoring/api/metrics_gcp#gcp-pubsub
-	return s.client.QueryMetrics(ctx, projectID, query)
+	return s.client.QueryMetrics(ctx, projectID, query, s.metadata.valueIfNull)
 }
 
 func getResourceData(s *pubsubScaler) (string, string) {

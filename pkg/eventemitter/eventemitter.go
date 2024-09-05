@@ -42,7 +42,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	eventingv1alpha1 "github.com/kedacore/keda/v2/apis/eventing/v1alpha1"
-	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/kedacore/keda/v2/pkg/eventemitter/eventdata"
 	"github.com/kedacore/keda/v2/pkg/metricscollector"
 	"github.com/kedacore/keda/v2/pkg/scaling/resolver"
@@ -74,7 +73,7 @@ type EventEmitter struct {
 type EventHandler interface {
 	DeleteCloudEventSource(cloudEventSource *eventingv1alpha1.CloudEventSource) error
 	HandleCloudEventSource(ctx context.Context, cloudEventSource *eventingv1alpha1.CloudEventSource) error
-	Emit(object runtime.Object, namesapce types.NamespacedName, eventType string, cloudeventType eventingv1alpha1.CloudEventType, reason string, message string)
+	Emit(object runtime.Object, namesapce string, eventType string, cloudeventType eventingv1alpha1.CloudEventType, reason string, message string)
 }
 
 // EventDataHandler defines the behavior for different event handlers
@@ -188,13 +187,6 @@ func (e *EventEmitter) createEventHandlers(ctx context.Context, cloudEventSource
 
 	// Resolve auth related
 	authParams, podIdentity, err := resolver.ResolveAuthRefAndPodIdentity(ctx, e.client, e.log, cloudEventSource.Spec.AuthenticationRef, nil, cloudEventSource.Namespace, e.secretsLister)
-	switch podIdentity.Provider {
-	case kedav1alpha1.PodIdentityProviderAzure:
-		// FIXME: Delete this for v2.15
-		e.log.Info("WARNING: Azure AD Pod Identity has been archived (https://github.com/Azure/aad-pod-identity#-announcement) and will be removed from KEDA on v2.15")
-	default:
-	}
-
 	if err != nil {
 		e.log.Error(err, "error resolving auth params", "cloudEventSource", cloudEventSource)
 		return
@@ -333,7 +325,7 @@ func (e *EventEmitter) checkEventHandlers(ctx context.Context, cloudEventSource 
 }
 
 // Emit is emitting event to both local kubernetes and custom CloudEventSource handler. After emit event to local kubernetes, event will inqueue and waitng for handler's consuming.
-func (e *EventEmitter) Emit(object runtime.Object, namesapce types.NamespacedName, eventType string, cloudeventType eventingv1alpha1.CloudEventType, reason, message string) {
+func (e *EventEmitter) Emit(object runtime.Object, namesapce string, eventType string, cloudeventType eventingv1alpha1.CloudEventType, reason, message string) {
 	e.recorder.Event(object, eventType, reason, message)
 
 	e.eventHandlersCacheLock.RLock()
@@ -345,7 +337,7 @@ func (e *EventEmitter) Emit(object runtime.Object, namesapce types.NamespacedNam
 	objectName, _ := meta.NewAccessor().Name(object)
 	objectType, _ := meta.NewAccessor().Kind(object)
 	eventData := eventdata.EventData{
-		Namespace:      namesapce.Namespace,
+		Namespace:      namesapce,
 		CloudEventType: cloudeventType,
 		ObjectName:     strings.ToLower(objectName),
 		ObjectType:     strings.ToLower(objectType),
