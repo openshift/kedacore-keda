@@ -131,7 +131,13 @@ e2e-test-openshift-setup: ## Setup the tests for OpenShift
 .PHONY: e2e-test-openshift
 e2e-test-openshift: ## Run tests for OpenShift
 	@echo "--- Running Internal Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca)
+	# TODO(jkyros): We might need our own launcher, not using the launcher is starting to hurt, the azure tests are gated by the launcher instead
+	# of in the test itself.
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then  \
+		cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca); \
+	else \
+		cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca | grep -v azure); \
+	fi
 	@echo "--- Running Scaler Tests ---"
 	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/... ./scalers/cron/...
 	@echo "--- Running Sequential Tests ---"
