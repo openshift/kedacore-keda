@@ -19,9 +19,10 @@ package scalers
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue"
 	"github.com/go-logr/logr"
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/metrics/pkg/apis/external_metrics"
@@ -33,17 +34,22 @@ import (
 )
 
 const (
-	queueLengthMetricName           = "queueLength"
-	activationQueueLengthMetricName = "activationQueueLength"
-	defaultTargetQueueLength        = 5
-	externalMetricType              = "External"
+	queueLengthMetricName                  = "queueLength"
+	activationQueueLengthMetricName        = "activationQueueLength"
+	defaultTargetQueueLength               = 5
+	externalMetricType                     = "External"
+	QueueLengthStrategyAll          string = "all"
+	QueueLengthStrategyVisibleOnly  string = "visibleonly"
+)
+
+var (
+	maxPeekMessages int32 = 32
 )
 
 type azureQueueScaler struct {
 	metricType  v2.MetricTargetType
 	metadata    *azureQueueMetadata
-	podIdentity kedav1alpha1.AuthPodIdentity
-	httpClient  *http.Client
+	queueClient *azqueue.QueueClient
 	logger      logr.Logger
 }
 
@@ -54,6 +60,7 @@ type azureQueueMetadata struct {
 	connection                  string
 	accountName                 string
 	endpointSuffix              string
+	queueLengthStrategy         string
 	triggerIndex                int
 }
 
@@ -71,11 +78,15 @@ func NewAzureQueueScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 		return nil, fmt.Errorf("error parsing azure queue metadata: %w", err)
 	}
 
+	queueClient, err := azure.GetStorageQueueClient(logger, podIdentity, meta.connection, meta.accountName, meta.endpointSuffix, meta.queueName, config.GlobalHTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("error creating azure blob client: %w", err)
+	}
+
 	return &azureQueueScaler{
 		metricType:  metricType,
 		metadata:    meta,
-		podIdentity: podIdentity,
-		httpClient:  kedautil.CreateHTTPClient(config.GlobalHTTPTimeout, false),
+		queueClient: queueClient,
 		logger:      logger,
 	}, nil
 }
@@ -120,11 +131,15 @@ func parseAzureQueueMetadata(config *scalersconfig.ScalerConfig, logger logr.Log
 		return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("no queueName given")
 	}
 
-	// before triggerAuthentication CRD, pod identity was configured using this property
-	if val, ok := config.TriggerMetadata["useAAdPodIdentity"]; ok && config.PodIdentity.Provider == "" {
-		if val == stringTrue {
-			config.PodIdentity = kedav1alpha1.AuthPodIdentity{Provider: kedav1alpha1.PodIdentityProviderAzure}
+	if val, ok := config.TriggerMetadata["queueLengthStrategy"]; ok && val != "" {
+		strategy := strings.ToLower(val)
+		if strategy == QueueLengthStrategyAll || strategy == QueueLengthStrategyVisibleOnly {
+			meta.queueLengthStrategy = strategy
+		} else {
+			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("invalid queueLengthStrategy %s given", val)
 		}
+	} else {
+		meta.queueLengthStrategy = QueueLengthStrategyAll
 	}
 
 	// If the Use AAD Pod Identity is not present, or set to "none"
@@ -143,7 +158,7 @@ func parseAzureQueueMetadata(config *scalersconfig.ScalerConfig, logger logr.Log
 		if len(meta.connection) == 0 {
 			return nil, kedav1alpha1.AuthPodIdentity{}, fmt.Errorf("no connection setting given")
 		}
-	case kedav1alpha1.PodIdentityProviderAzure, kedav1alpha1.PodIdentityProviderAzureWorkload:
+	case kedav1alpha1.PodIdentityProviderAzureWorkload:
 		// If the Use AAD Pod Identity is present then check account name
 		if val, ok := config.TriggerMetadata["accountName"]; ok && val != "" {
 			meta.accountName = val
@@ -160,9 +175,6 @@ func parseAzureQueueMetadata(config *scalersconfig.ScalerConfig, logger logr.Log
 }
 
 func (s *azureQueueScaler) Close(context.Context) error {
-	if s.httpClient != nil {
-		s.httpClient.CloseIdleConnections()
-	}
 	return nil
 }
 
@@ -179,22 +191,35 @@ func (s *azureQueueScaler) GetMetricSpecForScaling(context.Context) []v2.MetricS
 
 // GetMetricsAndActivity returns value for a supported metric and an error if there is a problem getting the metric
 func (s *azureQueueScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
-	queuelen, err := azure.GetAzureQueueLength(
-		ctx,
-		s.httpClient,
-		s.podIdentity,
-		s.metadata.connection,
-		s.metadata.queueName,
-		s.metadata.accountName,
-		s.metadata.endpointSuffix,
-	)
-
+	queuelen, err := s.getMessageCount(ctx)
 	if err != nil {
 		s.logger.Error(err, "error getting queue length")
 		return []external_metrics.ExternalMetricValue{}, false, err
 	}
 
 	metric := GenerateMetricInMili(metricName, float64(queuelen))
-
 	return []external_metrics.ExternalMetricValue{metric}, queuelen > s.metadata.activationTargetQueueLength, nil
+}
+
+func (s *azureQueueScaler) getMessageCount(ctx context.Context) (int64, error) {
+	strategy := strings.ToLower(s.metadata.queueLengthStrategy)
+	if strategy == QueueLengthStrategyVisibleOnly {
+		queue, err := s.queueClient.PeekMessages(ctx, &azqueue.PeekMessagesOptions{NumberOfMessages: &maxPeekMessages})
+		if err != nil {
+			return 0, err
+		}
+		visibleMessageCount := len(queue.Messages)
+
+		// Queue has less messages than we allowed to peek for,
+		// so no need to fall back to the 'all' strategy
+		if visibleMessageCount < int(maxPeekMessages) {
+			return int64(visibleMessageCount), nil
+		}
+	}
+
+	props, err := s.queueClient.GetProperties(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	return int64(*props.ApproximateMessagesCount), nil
 }
