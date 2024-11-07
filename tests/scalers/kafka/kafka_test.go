@@ -739,7 +739,15 @@ func testPersistentLag(t *testing.T, kc *kubernetes.Clientset, data templateData
 
 	// Scale application with kafka messages in persistentLagTopic
 	publishMessage(t, persistentLagTopic)
-	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 1, 60, 2),
+	// TODO(jkyros): this test started flaking after the offset tests were added, but only on OpenShift. It's not
+	// actually broken. From what I can tell, the published message gets snarfed off the queue almost immediately and we miss it here
+	// if our polling interval is 2s (the upstream setting), but we always catch it if it's 1s.
+	// Previously this persistent lag test ran immediately after testMultiTopic, and at the end of that test the deployment count was 2,
+	// but now with the offset tests, the deployment starts at 0 and scales up, so somehow maybe we had either been passing this assertion
+	// with the deployment from the previous case, or kafka was left in a different state with the old test than it does with the current test.
+	// I'd love to refactor this to be more deterministic, but it will take time. For now, we set the polling interval to 1s and vow to come back
+	// someday.
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 1, 120, 1),
 		"replica count should be %d after 2 minute", 1)
 	// Recreate Deployment to deliberately assign different consumer group to deployment and scaled object
 	// This is to simulate inability to consume from topic
