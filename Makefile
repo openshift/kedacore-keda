@@ -52,7 +52,7 @@ GO_LDFLAGS="-X=github.com/kedacore/keda/v2/version.GitCommit=$(GIT_COMMIT) -X=gi
 COSIGN_FLAGS ?= -y -a GIT_HASH=${GIT_COMMIT} -a GIT_VERSION=${VERSION} -a BUILD_DATE=${DATE}
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.28
+ENVTEST_K8S_VERSION = 1.30
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
@@ -73,11 +73,11 @@ all: build
 ##@ Test
 .PHONY: install-test-deps
 install-test-deps:
-	go install github.com/jstemmer/go-junit-report/v2@latest
+	go install gotest.tools/gotestsum@latest
 
 .PHONY: test
 test: manifests generate fmt vet envtest install-test-deps ## Run tests and export the result to junit format.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -v 2>&1 ./... -coverprofile cover.out | go-junit-report -iocopy -set-exit-code -out report.xml
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" gotestsum --format standard-quiet --rerun-fails --junitfile report.xml
 
 .PHONY:
 az-login:
@@ -131,7 +131,13 @@ e2e-test-openshift-setup: ## Setup the tests for OpenShift
 .PHONY: e2e-test-openshift
 e2e-test-openshift: ## Run tests for OpenShift
 	@echo "--- Running Internal Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca)
+	# TODO(jkyros): We might need our own launcher, not using the launcher is starting to hurt, the azure tests are gated by the launcher instead
+	# of in the test itself.
+	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then  \
+		cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca); \
+	else \
+		cd tests; go test -p 1 -v -timeout 60m -tags e2e $(shell cd tests; go list -tags e2e ./internals/... | grep -v internals/global_custom_ca | grep -v azure); \
+	fi
 	@echo "--- Running Scaler Tests ---"
 	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/... ./scalers/cron/...
 	@echo "--- Running Sequential Tests ---"
@@ -306,16 +312,11 @@ deploy: install ## Deploy controller to the K8s cluster specified in ~/.kube/con
 	cd config/manager && \
 	$(KUSTOMIZE) edit set image ghcr.io/kedacore/keda=${IMAGE_CONTROLLER} && \
 	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
-		$(KUSTOMIZE) edit add label --force aadpodidbinding:keda; \
-	fi && \
-	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
 		$(KUSTOMIZE) edit add label --force azure.workload.identity/use:true; \
 	fi
 	cd config/metrics-server && \
-    $(KUSTOMIZE) edit set image ghcr.io/kedacore/keda-metrics-apiserver=${IMAGE_ADAPTER} && \
-	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
-		$(KUSTOMIZE) edit add label --force aadpodidbinding:keda; \
-	fi
+    $(KUSTOMIZE) edit set image ghcr.io/kedacore/keda-metrics-apiserver=${IMAGE_ADAPTER}
+
 	if [ "$(AZURE_RUN_WORKLOAD_IDENTITY_TESTS)" = true ]; then \
 		cd config/service_account && \
 		$(KUSTOMIZE) edit add label --force azure.workload.identity/use:true; \
@@ -359,6 +360,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 MOCKGEN ?= $(LOCALBIN)/mockgen
 PROTOCGEN ?= $(LOCALBIN)/protoc-gen-go
 PROTOCGEN_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
+GO_JUNIT_REPORT ?= $(LOCALBIN)/go-junit-report
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Install controller-gen from vendor dir if necessary.
@@ -387,6 +389,10 @@ $(PROTOCGEN): $(LOCALBIN)
 $(PROTOCGEN_GRPC): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc
 
+.PHONY: go-junit-report
+go-junit-report: $(GO_JUNIT_REPORT) ## Install go-junit-report from vendor dir if necessary.
+$(GO_JUNIT_REPORT): $(LOCALBIN)
+	test -s $(LOCALBIN)/go-junit-report || GOBIN=$(LOCALBIN) go install github.com/jstemmer/go-junit-report/v2
 
 ##################################################
 # General                                        #
