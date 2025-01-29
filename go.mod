@@ -152,8 +152,8 @@ replace (
 	// https://avd.aquasec.com/nvd/cve-2024-45337
 	golang.org/x/crypto => golang.org/x/crypto v0.31.0
 
-	// Needed for CVE-2023-39325 https://nvd.nist.gov/vuln/detail/CVE-2023-39325
-	golang.org/x/net => golang.org/x/net v0.27.0
+	// Needed for CVE-2024-45338 https://avd.aquasec.com/nvd/cve-2024-45338
+	golang.org/x/net => golang.org/x/net v0.33.0
 
 	// https://nvd.nist.gov/vuln/detail/CVE-2022-32149
 	golang.org/x/text => golang.org/x/text v0.16.0
@@ -349,7 +349,7 @@ require (
 	golang.org/x/crypto v0.31.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/mod v0.19.0 // indirect
-	golang.org/x/net v0.27.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/term v0.27.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
