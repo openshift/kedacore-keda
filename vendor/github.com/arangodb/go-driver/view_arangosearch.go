@@ -1,7 +1,7 @@
 //
 // DISCLAIMER
 //
-// Copyright 2018-2023 ArangoDB GmbH, Cologne, Germany
+// Copyright 2018-2025 ArangoDB GmbH, Cologne, Germany
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -125,7 +125,7 @@ const (
 )
 
 // ArangoSearchEdgeNGram specifies options for the edgeNGram text analyzer.
-// More information can be found here: https://www.arangodb.com/docs/stable/arangosearch-analyzers.html#text
+// More information can be found here: https://docs.arangodb.com/stable/index-and-search/analyzers/#text
 type ArangoSearchEdgeNGram struct {
 	// Min used by Text
 	Min *int64 `json:"min,omitempty"`
@@ -155,7 +155,7 @@ func (a ArangoSearchFormat) New() *ArangoSearchFormat {
 
 // ArangoSearchAnalyzerProperties specifies options for the analyzer. Which fields are required and
 // respected depends on the analyzer type.
-// more information can be found here: https://www.arangodb.com/docs/stable/arangosearch-analyzers.html#analyzer-properties
+// more information can be found here: https://docs.arangodb.com/stable/index-and-search/analyzers/#analyzer-properties
 type ArangoSearchAnalyzerProperties struct {
 	// Locale used by Stem, Norm, Text
 	Locale string `json:"locale,omitempty"`
@@ -423,7 +423,7 @@ type ArangoSearchPrimarySortEntry struct {
 	Field     string `json:"field,omitempty"`
 	Ascending *bool  `json:"asc,omitempty"`
 
-	// deprecated, please use Ascending instead
+	// Deprecated: please use Ascending instead
 	Direction *ArangoSearchSortDirection `json:"direction,omitempty"`
 }
 
