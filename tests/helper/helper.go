@@ -30,13 +30,13 @@ import (
 	"github.com/stretchr/testify/require"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/kedacore/keda/v2/pkg/generated/clientset/versioned/typed/keda/v1alpha1"
@@ -234,72 +234,13 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-			Labels: map[string]string{"type": "e2e",
-				//TODO(jkyros): I don't like this but some of the stuff we're running doesn't react well to being unprivileged right now.
-				"pod-security.kubernetes.io/enforce": "privileged",
-				"pod-security.kubernetes.io/audit":   "privileged",
-				"pod-security.kubernetes.io/warn":    "privileged",
-			},
+			Name:   nsName,
+			Labels: map[string]string{"type": "e2e"},
 		},
 	}
 
 	_, err := kc.CoreV1().Namespaces().Create(context.Background(), namespace, metav1.CreateOptions{})
 	assert.NoErrorf(t, err, "cannot create kubernetes namespace - %s", err)
-
-	// For openshift, we need to allow the service accounts here to use sccs other than restricted, at least
-	// until we can refactor some of these tests to run under restricted, so this gives the service accounts
-	// in the test namespaces the ability to run privileged/anyuid pods
-	for _, rolebinding := range []*rbacv1.RoleBinding{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:privileged",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:privileged",
-				Kind: "ClusterRole",
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "system:openshift:scc:anyuid",
-				Namespace: namespace.Name,
-			},
-			Subjects: []rbacv1.Subject{
-				// Most of the manifests in here require privilege in order to bind to
-				// port 80. I think it was mostly done for expedience, I'm sure that
-				// someday we could re-arrange the tests so they can run under 'restricted'
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: namespace.Name,
-				},
-				// The promethus server test runs as its own service account and has a
-				// security context specified that requires anyuid
-				{
-					Kind:      "ServiceAccount",
-					Name:      "prometheus-test-server",
-					Namespace: "prometheus-test-ns",
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				Name: "system:openshift:scc:anyuid",
-				Kind: "ClusterRole",
-			},
-		},
-	} {
-		_, err := kc.RbacV1().RoleBindings(namespace.Name).Create(context.Background(), rolebinding, metav1.CreateOptions{})
-		assert.NoError(t, err, "cannot bind service accounts to SCCs")
-	}
-
 }
 
 func DeleteNamespace(t *testing.T, nsName string) {
@@ -312,6 +253,7 @@ func DeleteNamespace(t *testing.T, nsName string) {
 		err = nil
 	}
 	assert.NoErrorf(t, err, "cannot delete kubernetes namespace - %s", err)
+	DeletePodsInNamespace(t, nsName)
 }
 
 func WaitForJobSuccess(t *testing.T, kc *kubernetes.Clientset, jobName, namespace string, iterations, interval int) bool {
@@ -366,18 +308,15 @@ func WaitForNamespaceDeletion(t *testing.T, nsName string) bool {
 	return false
 }
 
-func WaitForScaledJobCount(t *testing.T, kc *kubernetes.Clientset, scaledJobName, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func WaitForScaledJobCount(t *testing.T, kc *kubernetes.Clientset, scaledJobName, namespace string, target, iterations, intervalSeconds int) bool {
 	return waitForJobCount(t, kc, fmt.Sprintf("scaledjob.keda.sh/name=%s", scaledJobName), namespace, target, iterations, intervalSeconds)
 }
 
-func WaitForJobCount(t *testing.T, kc *kubernetes.Clientset, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func WaitForJobCount(t *testing.T, kc *kubernetes.Clientset, namespace string, target, iterations, intervalSeconds int) bool {
 	return waitForJobCount(t, kc, "", namespace, target, iterations, intervalSeconds)
 }
 
-func waitForJobCount(t *testing.T, kc *kubernetes.Clientset, selector, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func waitForJobCount(t *testing.T, kc *kubernetes.Clientset, selector, namespace string, target, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
 		jobList, _ := kc.BatchV1().Jobs(namespace).List(context.Background(), metav1.ListOptions{
 			LabelSelector: selector,
@@ -397,9 +336,8 @@ func waitForJobCount(t *testing.T, kc *kubernetes.Clientset, selector, namespace
 	return false
 }
 
-func WaitForJobCountUntilIteration(t *testing.T, kc *kubernetes.Clientset, namespace string,
-	target, iterations, intervalSeconds int) bool {
-	var isTargetAchieved = false
+func WaitForJobCountUntilIteration(t *testing.T, kc *kubernetes.Clientset, namespace string, target, iterations, intervalSeconds int) bool {
+	isTargetAchieved := false
 
 	for i := 0; i < iterations; i++ {
 		jobList, _ := kc.BatchV1().Jobs(namespace).List(context.Background(), metav1.ListOptions{})
@@ -421,8 +359,7 @@ func WaitForJobCountUntilIteration(t *testing.T, kc *kubernetes.Clientset, names
 }
 
 // Waits until deployment count hits target or number of iterations are done.
-func WaitForPodCountInNamespace(t *testing.T, kc *kubernetes.Clientset, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func WaitForPodCountInNamespace(t *testing.T, kc *kubernetes.Clientset, namespace string, target, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
 		pods, _ := kc.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
 
@@ -467,8 +404,7 @@ func WaitForAllPodRunningInNamespace(t *testing.T, kc *kubernetes.Clientset, nam
 
 // Waits until the Horizontal Pod Autoscaler for the scaledObject reports that it has metrics available
 // to calculate, or until the number of iterations are done, whichever happens first.
-func WaitForHPAMetricsToPopulate(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
-	iterations, intervalSeconds int) bool {
+func WaitForHPAMetricsToPopulate(t *testing.T, kc *kubernetes.Clientset, name, namespace string, iterations, intervalSeconds int) bool {
 	totalWaitDuration := time.Duration(iterations) * time.Duration(intervalSeconds) * time.Second
 	startedWaiting := time.Now()
 	for i := 0; i < iterations; i++ {
@@ -493,8 +429,7 @@ func WaitForHPAMetricsToPopulate(t *testing.T, kc *kubernetes.Clientset, name, n
 }
 
 // Waits until deployment ready replica count hits target or number of iterations are done.
-func WaitForDeploymentReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func WaitForDeploymentReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, name, namespace string, target, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
 		deployment, _ := kc.AppsV1().Deployments(namespace).Get(context.Background(), name, metav1.GetOptions{})
 		replicas := deployment.Status.ReadyReplicas
@@ -513,8 +448,7 @@ func WaitForDeploymentReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, 
 }
 
 // Waits until statefulset count hits target or number of iterations are done.
-func WaitForStatefulsetReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
-	target, iterations, intervalSeconds int) bool {
+func WaitForStatefulsetReplicaReadyCount(t *testing.T, kc *kubernetes.Clientset, name, namespace string, target, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
 		statefulset, _ := kc.AppsV1().StatefulSets(namespace).Get(context.Background(), name, metav1.GetOptions{})
 		replicas := statefulset.Status.ReadyReplicas
@@ -575,8 +509,7 @@ func AssertReplicaCountNotChangeDuringTimePeriod(t *testing.T, kc *kubernetes.Cl
 	}
 }
 
-func WaitForHpaCreation(t *testing.T, kc *kubernetes.Clientset, name, namespace string,
-	iterations, intervalSeconds int) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+func WaitForHpaCreation(t *testing.T, kc *kubernetes.Clientset, name, namespace string, iterations, intervalSeconds int) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 	var err error
 	for i := 0; i < iterations; i++ {
@@ -604,34 +537,8 @@ type Template struct {
 	Name, Config string
 }
 
-// running this in OpenShift CI is a challenge with pull limits, so we need to replace some images with
-// ones we have cached. This is obviously not ideal, and should be refactored later.
-var imageRewrites = map[string]string{
-	"nginxinc/nginx-unprivileged":             preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-	"nginxinc/nginx-unprivileged:alpine-slim": preferEnv("quay.io/jkyros/nginx-unprivileged:alpine-slim", "IMG_NGINX_UNPRIVILEGED_SLIM"),
-	"confluentinc/cp-kafka:5.2.1":             preferEnv("quay.io/jkyros/cp-kafka:5.2.1", "IMG_KAFKA"),
-	"nginx:1.14.2":                            preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
-}
-
-// preverEnv returns the env value if populated, otherwise it returns the default string
-// it's used to allow test container images to be overridden by environment variables.
-func preferEnv(defaultValue, env string) string {
-	if val, ok := os.LookupEnv(env); ok {
-		return val
-	}
-	return defaultValue
-}
-
 func KubectlApplyWithTemplate(t *testing.T, data interface{}, templateName string, config string) {
 	t.Logf("Applying template: %s", templateName)
-
-	// If we're on openshift, rewrite the images on the templates to point to smoething we can pull
-	// TODO(jkyros): these should be injectable via env or something so we can use the images
-	// we've already pulled into CI
-	// TODO(jkyros): it is a shame we don't have a "pull interceptor" in CI
-	for old, new := range imageRewrites {
-		config = strings.ReplaceAll(config, old, new)
-	}
 
 	tmpl, err := template.New("kubernetes resource template").Parse(config)
 	assert.NoErrorf(t, err, "cannot parse template - %s", err)
@@ -830,15 +737,27 @@ func FindPodLogs(kc *kubernetes.Clientset, namespace, label string, includePrevi
 // Delete all pods in namespace by selector
 func DeletePodsInNamespaceBySelector(t *testing.T, kc *kubernetes.Clientset, selector, namespace string) {
 	t.Logf("killing all pods in %s namespace with selector %s", namespace, selector)
-	err := kc.CoreV1().Pods(namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{}, metav1.ListOptions{
+	err := kc.CoreV1().Pods(namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{
+		GracePeriodSeconds: ptr.To(int64(0)),
+	}, metav1.ListOptions{
 		LabelSelector: selector,
 	})
 	assert.NoErrorf(t, err, "cannot delete pods - %s", err)
 }
 
+// Delete all pods in namespace
+func DeletePodsInNamespace(t *testing.T, namespace string) {
+	err := GetKubernetesClient(t).CoreV1().Pods(namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{
+		GracePeriodSeconds: ptr.To(int64(0)),
+	}, metav1.ListOptions{})
+	if errors.IsNotFound(err) {
+		err = nil
+	}
+	assert.NoErrorf(t, err, "cannot delete pods - %s", err)
+}
+
 // Wait for Pods identified by selector to complete termination
-func WaitForPodsTerminated(t *testing.T, kc *kubernetes.Clientset, selector, namespace string,
-	iterations, intervalSeconds int) bool {
+func WaitForPodsTerminated(t *testing.T, kc *kubernetes.Clientset, selector, namespace string, iterations, intervalSeconds int) bool {
 	for i := 0; i < iterations; i++ {
 		pods, err := kc.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector})
 		if (err != nil && errors.IsNotFound(err)) || len(pods.Items) == 0 {

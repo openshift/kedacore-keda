@@ -218,6 +218,7 @@ spec:
       repos: {{.Repos}}
       labels: {{.Labels}}
       runnerScopeFromEnv: "RUNNER_SCOPE"
+      enableEtags: "true"
     authenticationRef:
      name: github-trigger-auth
 `
@@ -313,13 +314,11 @@ func TestScaler(t *testing.T) {
 
 	// test scaling Scaled Job with App
 	KubectlApplyWithTemplate(t, data, "scaledGhaJobTemplate", scaledGhaJobTemplate)
-	// testActivation(t, kc, client)
 	testJobScaleOut(t, kc, client, ghaWorkflowID)
 	testJobScaleIn(t, kc)
 
 	// test scaling Scaled Job
 	KubectlApplyWithTemplate(t, data, "scaledJobTemplate", scaledJobTemplate)
-	// testActivation(t, kc, client)
 	testJobScaleOut(t, kc, client, workflowID)
 	testJobScaleIn(t, kc)
 

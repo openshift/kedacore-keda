@@ -33,7 +33,7 @@ func (c *Client) CreateLoggingConfiguration(ctx context.Context, params *CreateL
 type CreateLoggingConfigurationInput struct {
 
 	// The ARN of the CloudWatch log group to which the vended log data will be
-	// published. This log group must exist prior to calling this API.
+	// published. This log group must exist prior to calling this operation.
 	//
 	// This member is required.
 	LogGroupArn *string
@@ -107,6 +107,9 @@ func (c *Client) addOperationCreateLoggingConfigurationMiddlewares(stack *middle
 	if err = addRecordResponseTiming(stack); err != nil {
 		return err
 	}
+	if err = addSpanRetryLoop(stack, options); err != nil {
+		return err
+	}
 	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
@@ -123,6 +126,9 @@ func (c *Client) addOperationCreateLoggingConfigurationMiddlewares(stack *middle
 		return err
 	}
 	if err = addUserAgentRetryMode(stack, options); err != nil {
+		return err
+	}
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addIdempotencyToken_opCreateLoggingConfigurationMiddleware(stack, options); err != nil {
@@ -147,6 +153,18 @@ func (c *Client) addOperationCreateLoggingConfigurationMiddlewares(stack *middle
 		return err
 	}
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addSpanInitializeStart(stack); err != nil {
+		return err
+	}
+	if err = addSpanInitializeEnd(stack); err != nil {
+		return err
+	}
+	if err = addSpanBuildRequestStart(stack); err != nil {
+		return err
+	}
+	if err = addSpanBuildRequestEnd(stack); err != nil {
 		return err
 	}
 	return nil

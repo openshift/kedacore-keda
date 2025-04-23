@@ -79,7 +79,7 @@ func NewOtelMetrics(options ...metric.Option) *OtelMetrics {
 		}
 
 		if err != nil {
-			fmt.Printf("Error:" + err.Error())
+			fmt.Printf("Error: %s", err.Error())
 			return nil
 		}
 		options = []metric.Option{metric.WithReader(metric.NewPeriodicReader(exporter))}
@@ -256,6 +256,10 @@ func (o *OtelMetrics) RecordScalerMetric(namespace string, scaledResource string
 	otelScalerMetric.val = value
 	otelScalerMetric.measurementOption = getScalerMeasurementOption(namespace, scaledResource, scaler, triggerIndex, metric, isScaledObject)
 	otelScalerMetricVals = append(otelScalerMetricVals, otelScalerMetric)
+}
+
+func (o *OtelMetrics) DeleteScalerMetrics(string, string, bool) {
+	// noop for OTel
 }
 
 func ScalerMetricsLatencyCallback(_ context.Context, obsrv api.Float64Observer) error {
