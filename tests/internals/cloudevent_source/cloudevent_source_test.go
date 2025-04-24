@@ -486,7 +486,9 @@ func testErrEventSourceExcludeValue(t *testing.T, _ *kubernetes.Clientset, data 
 	KubectlApplyWithTemplate(t, data, "scaledObjectErrTemplate", scaledObjectErrTemplate)
 
 	// wait 15 seconds to ensure event propagation
-	time.Sleep(15 * time.Second)
+	// TODO(maxcao13): test is flaking, but only on OpenShift
+	// bump the timings up so that this happens less, refactor later
+	time.Sleep(60 * time.Second)
 
 	out, outErr, err := ExecCommandOnSpecificPod(t, clientName, namespace, fmt.Sprintf("curl -X GET %s/getCloudEvent/%s", cloudEventHTTPServiceURL, "ScaledObjectCheckFailed"))
 	assert.NotEmpty(t, out)
@@ -527,7 +529,9 @@ func testErrEventSourceIncludeValue(t *testing.T, _ *kubernetes.Clientset, data 
 	KubectlApplyWithTemplate(t, data, "scaledObjectErrTemplate", scaledObjectErrTemplate)
 
 	// wait 15 seconds to ensure event propagation
-	time.Sleep(15 * time.Second)
+	// TODO(maxcao13): test is flaking, but only on OpenShift
+	// bump the timings up so that this happens less, refactor later
+	time.Sleep(60 * time.Second)
 
 	out, outErr, err := ExecCommandOnSpecificPod(t, clientName, namespace, fmt.Sprintf("curl -X GET %s/getCloudEvent/%s", cloudEventHTTPServiceURL, "ScaledObjectCheckFailed"))
 	assert.NotEmpty(t, out)
