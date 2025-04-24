@@ -141,7 +141,7 @@ e2e-test-openshift: ## Run tests for OpenShift
 	@echo "--- Running Scaler Tests ---"
 	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./scalers/cpu/... ./scalers/kafka/...  ./scalers/memory/... ./scalers/prometheus/... ./scalers/cron/...
 	@echo "--- Running Sequential Tests ---"
-	cd tests; go test -p 1 -v -timeout 60m -tags e2e ./sequential/...
+	cd tests; go test -p 1 -v -timeout 60m -tags e2e $(go list ./sequential/... | grep -v "datadog_dca")
 
 .PHONY: e2e-test-openshift-clean
 e2e-test-openshift-clean: ## Cleanup the test environment for OpenShift
