@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   fossa-key: 9e722f2c8904586d61f97f0bf05a99e4 # This is a public key only for pushing, it's safe here
 
@@ -17,20 +20,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
-      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5
         with:
-          go-version: "1.22"
+          go-version: "1.23"
       - run: go version
       - name: Get branch name
         id: branch-name
-        uses: tj-actions/branch-names@v8
-      - uses: fossas/fossa-action@main
+        uses: tj-actions/branch-names@f44339b51f74753b57583fbbd124e18a81170ab1 # v8.1.0
+      - uses: fossas/fossa-action@c0a7d013f84c8ee5e910593186598625513cc1e4 # v1.6.0
         name: Scanning with FOSSA
         with:
           api-key: ${{ env.fossa-key }}
           branch: ${{ steps.branch-name.outputs.current_branch }}
-      - uses: fossas/fossa-action@main
+      - uses: fossas/fossa-action@c0a7d013f84c8ee5e910593186598625513cc1e4 # v1.6.0
         name: Executing tests with FOSSA
         with:
           api-key: ${{ env.fossa-key }}

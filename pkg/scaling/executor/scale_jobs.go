@@ -65,16 +65,25 @@ func (e *scaleExecutor) RequestJobScale(ctx context.Context, scaledJob *kedav1al
 		logger.V(1).Info("No change in activity")
 	}
 
+	readyCondition := scaledJob.Status.Conditions.GetReadyCondition()
 	if isError {
 		// some triggers responded with error
 		// Set ScaledJob.Status.ReadyCondition to Unknown
-		readyCondition := scaledJob.Status.Conditions.GetReadyCondition()
 		msg := "Some triggers defined in ScaledJob are not working correctly"
 		logger.V(1).Info(msg)
 		if !readyCondition.IsUnknown() {
 			if err := e.setReadyCondition(ctx, logger, scaledJob, metav1.ConditionUnknown, "PartialTriggerError", msg); err != nil {
 				logger.Error(err, "error setting ready condition")
 			}
+		}
+	} else if !readyCondition.IsTrue() {
+		// if the ScaledObject's triggers aren't in the error state,
+		// but ScaledJob.Status.ReadyCondition is set not set to 'true' -> set it back to 'true'
+		msg := "ScaledJob is defined correctly and is ready for scaling"
+		logger.V(1).Info(msg)
+		if err := e.setReadyCondition(ctx, logger, scaledJob, metav1.ConditionTrue,
+			"ScaledJobReady", msg); err != nil {
+			logger.Error(err, "error setting ready condition")
 		}
 	}
 
@@ -216,7 +225,6 @@ func (e *scaleExecutor) getRunningJobCount(ctx context.Context, scaledJob *kedav
 	}
 
 	for _, job := range jobs.Items {
-		job := job
 		if !e.isJobFinished(&job) {
 			runningJobs++
 		}
@@ -290,8 +298,6 @@ func (e *scaleExecutor) getPendingJobCount(ctx context.Context, scaledJob *kedav
 	}
 
 	for _, job := range jobs.Items {
-		job := job
-
 		if !e.isJobFinished(&job) {
 			if len(scaledJob.Spec.ScalingStrategy.PendingPodConditions) > 0 {
 				if !e.areAllPendingPodConditionsFulfilled(ctx, &job, scaledJob.Spec.ScalingStrategy.PendingPodConditions) {
@@ -327,7 +333,6 @@ func (e *scaleExecutor) cleanUp(ctx context.Context, scaledJob *kedav1alpha1.Sca
 	var completedJobs []batchv1.Job
 	var failedJobs []batchv1.Job
 	for _, job := range jobs.Items {
-		job := job
 		finishedJobConditionType := e.getFinishedJobConditionType(&job)
 		switch finishedJobConditionType {
 		case batchv1.JobComplete:
@@ -460,11 +465,4 @@ type eagerScalingStrategy struct {
 
 func (s eagerScalingStrategy) GetEffectiveMaxScale(maxScale, runningJobCount, pendingJobCount, maxReplicaCount, _ int64) (int64, int64) {
 	return min(maxReplicaCount-runningJobCount-pendingJobCount, maxScale), maxReplicaCount
-}
-
-func min(x, y int64) int64 {
-	if x > y {
-		return y
-	}
-	return x
 }

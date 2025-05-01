@@ -13,9 +13,16 @@ import (
 	libs "github.com/dysnix/predictkube-libs/external/configs"
 	"github.com/dysnix/predictkube-libs/external/http_transport"
 	pConfig "github.com/prometheus/common/config"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
+
+type AuthClientSet struct {
+	corev1client.CoreV1Interface
+	corev1listers.SecretLister
+}
 
 const (
 	AuthModesKey = "authModes"
@@ -211,16 +218,16 @@ func CreateHTTPRoundTripper(roundTripperType TransportType, auth *AuthMeta, conf
 		if auth != nil {
 			if auth.EnableBasicAuth {
 				rt = pConfig.NewBasicAuthRoundTripper(
-					auth.Username,
-					pConfig.Secret(auth.Password),
-					"", "", roundTripper,
+					pConfig.NewInlineSecret(auth.Username),
+					pConfig.NewInlineSecret(auth.Password),
+					roundTripper,
 				)
 			}
 
 			if auth.EnableBearerAuth {
 				rt = pConfig.NewAuthorizationCredentialsRoundTripper(
 					"Bearer",
-					pConfig.Secret(auth.BearerToken),
+					pConfig.NewInlineSecret(auth.BearerToken),
 					roundTripper,
 				)
 			}
