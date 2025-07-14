@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -99,7 +98,7 @@ spec:
     spec:
       containers:
         - name: {{.MonitoredDeploymentName}}
-          image: nginxinc/nginx-unprivileged
+          image: ghcr.io/nginx/nginx-unprivileged:1.26
 `
 
 	deploymentTemplate = `
@@ -122,7 +121,7 @@ spec:
     spec:
       containers:
         - name: {{.DeploymentName}}
-          image: nginxinc/nginx-unprivileged
+          image: ghcr.io/nginx/nginx-unprivileged:1.26
 `
 
 	scaledObjectTemplate = `
@@ -956,13 +955,6 @@ func checkBuildInfo(t *testing.T, families map[string]*prommodel.MetricFamily) {
 	}
 
 	latestCommit := getLatestCommit(t)
-
-	// I haven't found a way to inject the actual value via CI yet, so for now just
-	// tolerate our "we build this in CI" dummy string
-	if _, ok := os.LookupEnv("OPENSHIFT_CI"); ok {
-		latestCommit = "dummy-ci-commit-value"
-	}
-
 	expected := map[string]string{
 		"git_commit": latestCommit,
 		"goos":       "linux",
