@@ -600,7 +600,7 @@ type Template struct {
 // running this in OpenShift CI is a challenge with pull limits, so we need to replace some images with
 // ones we have cached. This is obviously not ideal, and should be refactored later.
 var imageRewrites = map[string]string{
-	"nginxinc/nginx-unprivileged":             preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
+	"ghcr.io/nginx/nginx-unprivileged:1.26":   preferEnv("quay.io/jkyros/nginx-unprivileged:1.26", "IMG_NGINX_UNPRIVILEGED"),
 	"nginxinc/nginx-unprivileged:alpine-slim": preferEnv("quay.io/jkyros/nginx-unprivileged:alpine-slim", "IMG_NGINX_UNPRIVILEGED_SLIM"),
 	"confluentinc/cp-kafka:5.2.1":             preferEnv("quay.io/jkyros/cp-kafka:5.2.1", "IMG_KAFKA"),
 	"nginx:1.14.2":                            preferEnv("quay.io/jkyros/nginx-unprivileged", "IMG_NGINX_UNPRIVILEGED"),
