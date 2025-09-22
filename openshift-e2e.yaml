@@ -1,0 +1,23 @@
+keda:
+  skipSetup: true
+  skipCleanup: true
+testCategories:
+  internals:
+    mode: exclude
+    tests:
+      - eventemitter/azureeventgridtopic
+      - global_custom_ca
+  scalers:
+    mode: include
+    tests:
+      - cpu
+      - cron
+      - kafka
+      - memory
+      - prometheus
+  secret-providers:
+    mode: exclude
+  sequential:
+    mode: exclude
+    tests:
+      - datadog_dca
