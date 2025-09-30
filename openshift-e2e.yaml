@@ -13,6 +13,7 @@ testCategories:
       - cpu
       - cron
       - kafka
+      - kubernetes_workload
       - memory
       - prometheus
   secret-providers:
