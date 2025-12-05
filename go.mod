@@ -1,6 +1,8 @@
 module github.com/kedacore/keda/v2
 
-go 1.24.7
+// TODO(jkyros): upstream has 1.24.7 but doesn't need it, and we don't have a > 1.24.6 builder
+// so we have to force this to 1.24.6 for now
+go 1.24.6
 
 replace (
 	// we need a version with a proper license
