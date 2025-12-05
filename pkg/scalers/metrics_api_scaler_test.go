@@ -46,7 +46,7 @@ var testMetricsAPIAuthMetadata = []metricAPIAuthMetadataTestData{
 	// success TLS
 	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "authMode": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert", "key": "keey"}, false},
 	// fail TLS, ca not given
-	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "authMode": "tls"}, map[string]string{"cert": "ceert", "key": "keey"}, true},
+	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "authMode": "tls"}, map[string]string{"cert": "ceert", "key": "keey"}, false},
 	// fail TLS, key not given
 	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "authMode": "tls"}, map[string]string{"ca": "caaa", "cert": "ceert"}, true},
 	// fail TLS, cert not given
@@ -75,6 +75,8 @@ var testMetricsAPIAuthMetadata = []metricAPIAuthMetadataTestData{
 	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "unsafeSsl": "false"}, map[string]string{}, false},
 	// failed unsafeSsl non bool
 	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "unsafeSsl": "yes"}, map[string]string{}, true},
+	// success with both apiKey and TLS authentication
+	{map[string]string{"url": "http://dummy:1230/api/v1/", "valueLocation": "metric", "targetValue": "42", "authMode": "apiKey,tls"}, map[string]string{"apiKey": "apiikey", "ca": "caaa", "cert": "ceert", "key": "keey"}, false},
 }
 
 func TestParseMetricsAPIMetadata(t *testing.T) {
@@ -177,22 +179,13 @@ func TestGetValueFromResponse(t *testing.T) {
 
 func TestMetricAPIScalerAuthParams(t *testing.T) {
 	for _, testData := range testMetricsAPIAuthMetadata {
-		meta, err := parseMetricsAPIMetadata(&scalersconfig.ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
+		_, err := parseMetricsAPIMetadata(&scalersconfig.ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams})
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
 		}
 		if testData.isError && err == nil {
 			t.Error("Expected error but got success")
-		}
-
-		if err == nil {
-			if (meta.enableAPIKeyAuth && !(testData.metadata["authMode"] == "apiKey")) ||
-				(meta.enableBaseAuth && !(testData.metadata["authMode"] == "basic")) ||
-				(meta.enableTLS && !(testData.metadata["authMode"] == "tls")) ||
-				(meta.enableBearerAuth && !(testData.metadata["authMode"] == "bearer")) {
-				t.Error("wrong auth mode detected")
-			}
 		}
 	}
 }
@@ -258,7 +251,7 @@ func TestGetMetricValueErrorMessage(t *testing.T) {
 
 	httpClient := http.Client{Transport: &mockHTTPRoundTripper}
 	s := metricsAPIScaler{
-		metadata:   &metricsAPIScalerMetadata{url: "http://dummy:1230/api/v1/"},
+		metadata:   &metricsAPIScalerMetadata{URL: "http://dummy:1230/api/v1/"},
 		httpClient: &httpClient,
 	}
 

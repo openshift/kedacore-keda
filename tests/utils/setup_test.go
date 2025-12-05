@@ -63,6 +63,20 @@ func TestSetupAzureManagedPrometheusComponents(t *testing.T) {
 	KubectlApplyWithTemplate(t, helper.EmptyTemplateData{}, "azureManagedPrometheusConfigMapTemplate", helper.AzureManagedPrometheusConfigMapTemplate)
 }
 
+func TestSetupArgoRollouts(t *testing.T) {
+	// default to true
+	if InstallArgoRollouts == StringFalse {
+		t.Skip("skipping as requested -- Argo Rollouts assumed to be already installed")
+	}
+	KubeClient = GetKubernetesClient(t)
+	CreateNamespace(t, KubeClient, ArgoRolloutsNamespace)
+	cmdWithNamespace := fmt.Sprintf("kubectl apply -n %s -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml",
+		ArgoRolloutsNamespace)
+	_, err := ExecuteCommand(cmdWithNamespace)
+
+	require.NoErrorf(t, err, "cannot install argo resources - %s", err)
+}
+
 func TestSetupCertManager(t *testing.T) {
 	if !InstallCertManager {
 		t.Skip("skipping cert manager is not required")
@@ -151,7 +165,7 @@ func TestSetupGcpIdentityComponents(t *testing.T) {
 	require.NoErrorf(t, err, "cannot install workload identity webhook - %s", err)
 }
 
-func TesVerifyPodsIdentity(t *testing.T) {
+func TestVerifyPodsIdentity(t *testing.T) {
 	if AzureRunWorkloadIdentityTests == StringTrue {
 		assert.True(t, WaitForDeploymentReplicaReadyCount(t, KubeClient, "azure-wi-webhook-controller-manager", "azure-workload-identity-system", 2, 30, 6),
 			"replica count should be 1 after 3 minutes")

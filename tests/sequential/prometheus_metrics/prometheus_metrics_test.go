@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -973,13 +972,6 @@ func checkBuildInfo(t *testing.T, families map[string]*prommodel.MetricFamily) {
 	}
 
 	latestCommit := getLatestCommit(t)
-
-	// I haven't found a way to inject the actual value via CI yet, so for now just
-	// tolerate our "we build this in CI" dummy string
-	if _, ok := os.LookupEnv("OPENSHIFT_CI"); ok {
-		latestCommit = "dummy-ci-commit-value"
-	}
-
 	expected := map[string]string{
 		"git_commit": latestCommit,
 		"goos":       "linux",
@@ -1075,9 +1067,10 @@ func checkCRTotalValues(t *testing.T, families map[string]*prommodel.MetricFamil
 		labels := metric.GetLabel()
 		var namespace, crType string
 		for _, label := range labels {
-			if *label.Name == labelType {
+			switch *label.Name {
+			case labelType:
 				crType = *label.Value
-			} else if *label.Name == namespaceString {
+			case namespaceString:
 				namespace = *label.Value
 			}
 		}
@@ -1100,9 +1093,10 @@ func checkCRTotalValues(t *testing.T, families map[string]*prommodel.MetricFamil
 		labels := metric.GetLabel()
 		var namespace, crType string
 		for _, label := range labels {
-			if *label.Name == labelType {
+			switch *label.Name {
+			case labelType:
 				crType = *label.Value
-			} else if *label.Name == namespaceString {
+			case namespaceString:
 				namespace = *label.Value
 			}
 		}
@@ -1387,10 +1381,10 @@ func testCloudEventEmitted(t *testing.T, data templateData) {
 		for _, metric := range labels {
 			labels := metric.GetLabel()
 			if len(labels) >= 4 &&
-				*labels[0].Value == "prometheus-metrics-test-ce" &&
-				*labels[1].Value == "http" &&
-				*labels[2].Value == "prometheus-metrics-test-ns" &&
-				*labels[3].Value == "emitted" &&
+				ExtractPrometheusLabelValue("cloudeventsource", labels) == "prometheus-metrics-test-ce" &&
+				ExtractPrometheusLabelValue("eventsink", labels) == "http" &&
+				ExtractPrometheusLabelValue("namespace", labels) == "prometheus-metrics-test-ns" &&
+				ExtractPrometheusLabelValue("state", labels) == "emitted" &&
 				metric.GetCounter().GetValue() >= 1 {
 				found = true
 			}
@@ -1416,18 +1410,19 @@ func testCloudEventEmittedError(t *testing.T, data templateData) {
 
 	familyValidator := func(family *prommodel.MetricFamily) bool {
 		labels := family.GetMetric()
+		found := false
 		for _, metric := range labels {
 			labels := metric.GetLabel()
 			if len(labels) >= 4 &&
-				*labels[0].Value == "prometheus-metrics-test-ce-w" &&
-				*labels[1].Value == "http" &&
-				*labels[2].Value == "prometheus-metrics-test-ns" &&
-				*labels[3].Value == "failed" &&
+				ExtractPrometheusLabelValue("cloudeventsource", labels) == "prometheus-metrics-test-ce-w" &&
+				ExtractPrometheusLabelValue("eventsink", labels) == "http" &&
+				ExtractPrometheusLabelValue("namespace", labels) == "prometheus-metrics-test-ns" &&
+				ExtractPrometheusLabelValue("state", labels) == "failed" &&
 				metric.GetCounter().GetValue() >= 5 {
-				return true
+				found = true
 			}
 		}
-		return false
+		return found
 	}
 
 	families := WaitForPrometheusMetric(t, "keda_cloudeventsource_events_emitted_total", familyValidator)

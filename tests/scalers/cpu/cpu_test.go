@@ -71,13 +71,6 @@ spec:
           requests:
             cpu: 200m
         imagePullPolicy: IfNotPresent
-        securityContext:
-          privileged: true
-          runAsNonRoot: false
-          readOnlyRootFilesystem: false
-          capabilities:
-            drop:
-            - ALL
 `
 
 	serviceTemplate = `apiVersion: v1
@@ -114,8 +107,8 @@ spec:
     name: {{.DeploymentName}}
   triggers:
   - type: cpu
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "50"
 `
 	scaledObjectTwoTriggerTemplate = `
@@ -140,8 +133,8 @@ spec:
   cooldownPeriod: 1
   triggers:
   - type: cpu
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "50"
   - type: kubernetes-workload
     metadata:

@@ -72,13 +72,6 @@ spec:
           requests:
             memory: 50Mi
         imagePullPolicy: IfNotPresent
-        securityContext:
-          privileged: true
-          runAsNonRoot: false
-          readOnlyRootFilesystem: false
-          capabilities:
-            drop:
-            - ALL
 `
 
 	scaledObjectTemplate = `
@@ -105,8 +98,8 @@ spec:
     name: {{.DeploymentName}}
   triggers:
   - type: memory
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "{{.UtilizationValue}}"
 `
 
@@ -132,8 +125,8 @@ spec:
   cooldownPeriod: 1
   triggers:
   - type: memory
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "{{.UtilizationValue}}"
   - type: kubernetes-workload
     metadata:
@@ -160,15 +153,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: 'ghcr.io/nginx/nginx-unprivileged:1.26'
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop:
-              - ALL
-            seccompProfile:
-              type: RuntimeDefault`
+          image: 'ghcr.io/nginx/nginx-unprivileged:1.26'`
 
 	scaleUpValue   = 1
 	scaleDownValue = 45
