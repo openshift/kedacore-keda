@@ -27,8 +27,9 @@ var (
 	maxReplicaCount         = 1
 	minReplicaCount         = 0
 	testScaleOutWaitMin     = 1
-	testPauseAtNWaitMin     = 1
-	testScaleInWaitMin      = 1
+	// TODO(jkyros): On OpenShift we have to wait longer than one minute for some reason?
+	testPauseAtNWaitMin = 2
+	testScaleInWaitMin  = 1
 )
 
 type templateData struct {
