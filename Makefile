@@ -3,17 +3,8 @@
 ##################################################
 SHELL           = /bin/bash
 
-# If E2E_IMAGE_TAG is defined, we are on pr e2e test and we have to use the new tag and append -test to the repository
-ifeq '${E2E_IMAGE_TAG}' ''
 VERSION ?= main
-# SUFFIX here is intentional empty to not append nothing to the repository
-SUFFIX =
-endif
-
-ifneq '${E2E_IMAGE_TAG}' ''
-VERSION = ${E2E_IMAGE_TAG}
-SUFFIX = -test
-endif
+SUFFIX ?=
 
 IMAGE_REGISTRY ?= ghcr.io
 IMAGE_REPO     ?= kedacore
@@ -26,7 +17,7 @@ ARCH       ?=amd64
 CGO        ?=0
 TARGET_OS  ?=linux
 
-BUILD_PLATFORMS ?= linux/amd64,linux/arm64
+BUILD_PLATFORMS ?= linux/amd64,linux/arm64,linux/s390x
 OUTPUT_TYPE     ?= registry
 
 GIT_VERSION ?= $(shell git describe --always --abbrev=7)
@@ -54,15 +45,25 @@ GO_LDFLAGS="-X=github.com/kedacore/keda/v2/version.GitCommit=$(GIT_COMMIT) -X=gi
 COSIGN_FLAGS ?= -y -a GIT_HASH=${GIT_COMMIT} -a GIT_VERSION=${VERSION} -a BUILD_DATE=${DATE}
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.32
+ENVTEST_K8S_VERSION = 1.33
 
-GOLANGCI_VERSION:=1.63.4
+GOLANGCI_VERSION:=2.5.0
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
+
+# Scaler schema generation parameters
+SCALERS_SCHEMA_SCALERS_BUILDER_FILE ?= pkg/scaling/scalers_builder.go
+SCALERS_SCHEMA_SCALERS_FILES_DIR ?= pkg/scalers
+SCALERS_SCHEMA_OUTPUT_FILE_PATH ?= schema/generated/
+SCALERS_SCHEMA_OUTPUT_FILE_NAME ?= scalers-metadata-schema
+
+ifneq '${VERSION}' 'main'
+  OUTPUT_FILE_NAME :="${OUTPUT_FILE_NAME}-${VERSION}"
+endif
 
 ##################################################
 # All                                            #
@@ -78,6 +79,10 @@ all: build
 .PHONY: test
 test: manifests generate fmt vet envtest gotestsum ## Run tests and export the result to junit format.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GOTESTSUM) --format standard-quiet --rerun-fails --junitfile report.xml
+
+.PHONY: test-race
+test-race: manifests generate fmt vet envtest gotestsum ## Run tests and export the result to junit format.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GOTESTSUM) --format standard-quiet --rerun-fails --junitfile report-race.xml --packages=./... -- -race
 
 .PHONY:
 az-login:
@@ -119,6 +124,9 @@ e2e-test-clean-crds: ## Delete all scaled objects and jobs across all namespaces
 .PHONY: e2e-test-clean
 e2e-test-clean: get-cluster-context ## Delete all namespaces labeled with type=e2e
 	kubectl delete ns -l type=e2e
+	# Clean up the strimzi CRDs, helm will not update them on Strimzi install if they already exist
+	# and we get stranded on old versions when we try to upgrade
+	kubectl get crd -o name | grep kafka.strimzi.io | xargs -r kubectl delete --ignore-not-found=true --timeout=60s
 
 # The OpenShift tests are split into 3 targets because when we test the CMA operator,
 # we want to do the setup and cleanup with the operator, but still run the test suite
@@ -155,7 +163,7 @@ manifests: controller-gen ## Generate ClusterRole and CustomResourceDefinition o
 	# until this issue is fixed: https://github.com/kubernetes-sigs/controller-tools/issues/398
 	rm config/crd/bases/keda.sh_withtriggers.yaml
 
-generate: controller-gen mockgen-gen proto-gen ## Generate code containing DeepCopy, DeepCopyInto, DeepCopyObject method implementations (API), mocks and proto.
+generate: controller-gen mockgen-gen proto-gen generate-scalers-schema ## Generate code containing DeepCopy, DeepCopyInto, DeepCopyObject method implementations (API), mocks and proto.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 fmt: ## Run go fmt against code.
@@ -240,7 +248,7 @@ webhooks: generate
 	${GO_BUILD_VARS} go build -ldflags $(GO_LDFLAGS) -mod=vendor -o bin/keda-admission-webhooks cmd/webhooks/main.go
 
 run: manifests generate ## Run a controller from your host.
-	WATCH_NAMESPACE="" go run -ldflags $(GO_LDFLAGS) ./cmd/operator/main.go $(ARGS)
+	KEDA_CLUSTER_OBJECT_NAMESPACE=keda WATCH_NAMESPACE="" go run -ldflags $(GO_LDFLAGS) ./cmd/operator/main.go $(ARGS)
 
 docker-build: ## Build docker images with the KEDA Operator and Metrics Server.
 	DOCKER_BUILDKIT=1 docker build . -t ${IMAGE_CONTROLLER} --build-arg BUILD_VERSION=${VERSION} --build-arg GIT_VERSION=${GIT_VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT}
@@ -263,7 +271,7 @@ publish-webhooks-multiarch: ## Build and push multi-arch Docker image for KEDA H
 
 publish-multiarch: publish-controller-multiarch publish-adapter-multiarch publish-webhooks-multiarch ## Push multi-arch Docker images on to Container Registry (default: ghcr.io).
 
-release: manifests kustomize set-version ## Produce new KEDA release in keda-$(VERSION).yaml file.
+release: manifests kustomize set-version generate-scalers-schema ## Produce new KEDA release in keda-$(VERSION).yaml file.
 	cd config/manager && \
 	$(KUSTOMIZE) edit set image ghcr.io/kedacore/keda=${IMAGE_CONTROLLER}
 	cd config/metrics-server && \
@@ -288,6 +296,14 @@ sign-images: ## Sign KEDA images published on GitHub Container Registry
 set-version:
 	@sed -i".out" -e 's@Version[ ]*=.*@Version = "$(VERSION)"@g' ./version/version.go;
 	rm -rf ./version/version.go.out
+
+.PHONY: generate-scalers-schema
+generate-scalers-schema: ## Generate scalers schema
+	GOBIN=$(LOCALBIN) go run ./schema/generate_scaler_schema.go --keda-version $(VERSION) --scalers-builder-file $(SCALERS_SCHEMA_SCALERS_BUILDER_FILE) --scalers-files-dir $(SCALERS_SCHEMA_SCALERS_FILES_DIR) --output-file-path $(SCALERS_SCHEMA_OUTPUT_FILE_PATH) --output-file-name $(SCALERS_SCHEMA_OUTPUT_FILE_NAME) --output-file-format both
+
+.PHONY: verify-scalers-schema
+verify-scalers-schema: ## Verify scalers schema
+	./hack/verify-schema.sh
 
 ##################################################
 # Deployment                                     #

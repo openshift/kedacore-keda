@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -432,7 +433,7 @@ func testErrEventSourceEmitValue(t *testing.T, kc *kubernetes.Clientset, data te
 
 			assert.NoError(t, err)
 			assert.Condition(t, func() bool {
-				if data["message"] == message.ScaleTargetErrMsg || data["message"] == message.ScaleTargetNotFoundMsg {
+				if strings.Contains(data["message"], message.ScaleTargetErrMsg) || strings.Contains(data["message"], message.ScaleTargetNotFoundMsg) {
 					return true
 				}
 				return false

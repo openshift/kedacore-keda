@@ -3,3 +3,4 @@ exclude:
     - "vendor/**"
     - "**/*_test.go"
     - "tests/**"  # contains test code that does not end in _test.go
+    - "schema/generate_scaler_schema.go" #schema generator is just a tool, not part of the app

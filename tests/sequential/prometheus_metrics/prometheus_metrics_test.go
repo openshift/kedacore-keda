@@ -1023,6 +1023,13 @@ func checkTriggerTotalValues(t *testing.T, families map[string]*prommodel.Metric
 			if *label.Name == labelType {
 				triggerType := *label.Value
 				metricValue := *metric.Gauge.Value
+
+				// Only validate triggers we expect - skip stale metrics from previous tests
+				if _, exists := expected[triggerType]; !exists {
+					t.Logf("Skipping stale metric for trigger type %s (not in expected triggers)", triggerType)
+					continue
+				}
+
 				expectedMetricValue := float64(expected[triggerType])
 
 				assert.Equalf(t, expectedMetricValue, metricValue, "expected %f got %f for trigger type %s",
@@ -1048,6 +1055,13 @@ func checkTriggerTotalValues(t *testing.T, families map[string]*prommodel.Metric
 			if *label.Name == labelType {
 				triggerType := *label.Value
 				metricValue := *metric.Gauge.Value
+
+				// Only validate triggers we expect - skip stale metrics from previous tests
+				if _, exists := expected[triggerType]; !exists {
+					t.Logf("Skipping stale metric for trigger type %s (not in expected triggers)", triggerType)
+					continue
+				}
+
 				expectedMetricValue := float64(expected[triggerType])
 
 				assert.Equalf(t, expectedMetricValue, metricValue, "expected %f got %f for trigger type %s",
@@ -1075,11 +1089,18 @@ func checkCRTotalValues(t *testing.T, families map[string]*prommodel.MetricFamil
 		labels := metric.GetLabel()
 		var namespace, crType string
 		for _, label := range labels {
-			if *label.Name == labelType {
+			switch *label.Name {
+			case labelType:
 				crType = *label.Value
-			} else if *label.Name == namespaceString {
+			case namespaceString:
 				namespace = *label.Value
 			}
+		}
+
+		// Skip metrics from namespaces not in our expected map (stale metrics from previous tests)
+		if _, namespaceExists := expected[crType][namespace]; !namespaceExists {
+			t.Logf("Skipping stale metric for cr type %s in namespace %s (not in expected namespaces)", crType, namespace)
+			continue
 		}
 
 		metricValue := *metric.Gauge.Value
@@ -1100,11 +1121,18 @@ func checkCRTotalValues(t *testing.T, families map[string]*prommodel.MetricFamil
 		labels := metric.GetLabel()
 		var namespace, crType string
 		for _, label := range labels {
-			if *label.Name == labelType {
+			switch *label.Name {
+			case labelType:
 				crType = *label.Value
-			} else if *label.Name == namespaceString {
+			case namespaceString:
 				namespace = *label.Value
 			}
+		}
+
+		// Skip metrics from namespaces not in our expected map (stale metrics from previous tests)
+		if _, namespaceExists := expected[crType][namespace]; !namespaceExists {
+			t.Logf("Skipping stale metric for cr type %s in namespace %s (not in expected namespaces)", crType, namespace)
+			continue
 		}
 
 		metricValue := *metric.Gauge.Value
@@ -1387,10 +1415,10 @@ func testCloudEventEmitted(t *testing.T, data templateData) {
 		for _, metric := range labels {
 			labels := metric.GetLabel()
 			if len(labels) >= 4 &&
-				*labels[0].Value == "prometheus-metrics-test-ce" &&
-				*labels[1].Value == "http" &&
-				*labels[2].Value == "prometheus-metrics-test-ns" &&
-				*labels[3].Value == "emitted" &&
+				ExtractPrometheusLabelValue("cloudeventsource", labels) == "prometheus-metrics-test-ce" &&
+				ExtractPrometheusLabelValue("eventsink", labels) == "http" &&
+				ExtractPrometheusLabelValue("namespace", labels) == "prometheus-metrics-test-ns" &&
+				ExtractPrometheusLabelValue("state", labels) == "emitted" &&
 				metric.GetCounter().GetValue() >= 1 {
 				found = true
 			}
@@ -1416,18 +1444,19 @@ func testCloudEventEmittedError(t *testing.T, data templateData) {
 
 	familyValidator := func(family *prommodel.MetricFamily) bool {
 		labels := family.GetMetric()
+		found := false
 		for _, metric := range labels {
 			labels := metric.GetLabel()
 			if len(labels) >= 4 &&
-				*labels[0].Value == "prometheus-metrics-test-ce-w" &&
-				*labels[1].Value == "http" &&
-				*labels[2].Value == "prometheus-metrics-test-ns" &&
-				*labels[3].Value == "failed" &&
+				ExtractPrometheusLabelValue("cloudeventsource", labels) == "prometheus-metrics-test-ce-w" &&
+				ExtractPrometheusLabelValue("eventsink", labels) == "http" &&
+				ExtractPrometheusLabelValue("namespace", labels) == "prometheus-metrics-test-ns" &&
+				ExtractPrometheusLabelValue("state", labels) == "failed" &&
 				metric.GetCounter().GetValue() >= 5 {
-				return true
+				found = true
 			}
 		}
-		return false
+		return found
 	}
 
 	families := WaitForPrometheusMetric(t, "keda_cloudeventsource_events_emitted_total", familyValidator)

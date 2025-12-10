@@ -38,6 +38,19 @@ import (
 	version "github.com/kedacore/keda/v2/version"
 )
 
+// storeHpaNameInStatus updates the ScaledObject status subresource with the hpaName.
+func (r *ScaledObjectReconciler) storeHpaNameInStatus(ctx context.Context, logger logr.Logger, scaledObject *kedav1alpha1.ScaledObject, hpaName string) error {
+	status := scaledObject.Status.DeepCopy()
+	status.HpaName = hpaName
+
+	err := kedastatus.UpdateScaledObjectStatus(ctx, r.Client, logger, scaledObject, status)
+	if err != nil {
+		logger.Error(err, "Failed to update scaledObject status with used hpaName")
+		return err
+	}
+	return nil
+}
+
 // createAndDeployNewHPA creates and deploy HPA in the cluster for specified ScaledObject
 func (r *ScaledObjectReconciler) createAndDeployNewHPA(ctx context.Context, logger logr.Logger, scaledObject *kedav1alpha1.ScaledObject, gvkr *kedav1alpha1.GroupVersionKindResource) error {
 	hpaName := getHPAName(scaledObject)
@@ -54,17 +67,7 @@ func (r *ScaledObjectReconciler) createAndDeployNewHPA(ctx context.Context, logg
 		return err
 	}
 
-	// store hpaName in the ScaledObject
-	status := scaledObject.Status.DeepCopy()
-	status.HpaName = hpaName
-
-	err = kedastatus.UpdateScaledObjectStatus(ctx, r.Client, logger, scaledObject, status)
-	if err != nil {
-		logger.Error(err, "Failed to update scaledObject status with used hpaName")
-		return err
-	}
-
-	return nil
+	return r.storeHpaNameInStatus(ctx, logger, scaledObject, hpaName)
 }
 
 // newHPAForScaledObject returns HPA as it is specified in ScaledObject
@@ -81,6 +84,50 @@ func (r *ScaledObjectReconciler) newHPAForScaledObject(ctx context.Context, logg
 		behavior = nil
 	}
 
+	if scaledObject.NeedToPauseScaleIn() {
+		// If the paused-scale-in annotation is set, set the HPA ScaleDown Select policy to Disabled
+		// to prevent the HPA from scaling down the scale target
+		if behavior == nil {
+			behavior = &autoscalingv2.HorizontalPodAutoscalerBehavior{}
+		}
+		if behavior.ScaleDown == nil {
+			behavior.ScaleDown = &autoscalingv2.HPAScalingRules{}
+		}
+
+		disabledPolicy := autoscalingv2.DisabledPolicySelect
+		behavior.ScaleDown.SelectPolicy = &disabledPolicy
+
+		logger.Info(
+			"Scale in paused by annotation, setting HPA Scale Down Select Behavior to Disabled",
+			"HPA.Namespace",
+			scaledObject.Namespace,
+			"HPA.Name",
+			getHPAName(scaledObject),
+		)
+	}
+
+	if scaledObject.NeedToPauseScaleOut() {
+		// If the paused-scale-out annotation is set, set the HPA ScaleUp Select policy to Disabled
+		// to prevent the HPA from scaling up the scale target
+		if behavior == nil {
+			behavior = &autoscalingv2.HorizontalPodAutoscalerBehavior{}
+		}
+		if behavior.ScaleUp == nil {
+			behavior.ScaleUp = &autoscalingv2.HPAScalingRules{}
+		}
+
+		disabledPolicy := autoscalingv2.DisabledPolicySelect
+		behavior.ScaleUp.SelectPolicy = &disabledPolicy
+
+		logger.Info(
+			"Scale out paused by annotation, setting HPA Scale Up Select Behavior to Disabled",
+			"HPA.Namespace",
+			scaledObject.Namespace,
+			"HPA.Name",
+			getHPAName(scaledObject),
+		)
+	}
+
 	// label can have max 63 chars
 	labelName := getHPAName(scaledObject)
 	if len(labelName) > 63 {
@@ -95,7 +142,20 @@ func (r *ScaledObjectReconciler) newHPAForScaledObject(ctx context.Context, logg
 		"app.kubernetes.io/part-of":    scaledObject.Name,
 		"app.kubernetes.io/managed-by": "keda-operator",
 	}
-	for key, value := range scaledObject.ObjectMeta.Labels {
+
+	excludedLabels := map[string]struct{}{}
+
+	if labels, ok := scaledObject.Annotations[kedav1alpha1.ScaledObjectExcludedLabelsAnnotation]; ok {
+		for _, excludedLabel := range strings.Split(labels, ",") {
+			excludedLabels[excludedLabel] = struct{}{}
+		}
+	}
+
+	for key, value := range scaledObject.Labels {
+		if _, ok := excludedLabels[key]; ok {
+			continue
+		}
+
 		labels[key] = value
 	}
 
@@ -165,21 +225,21 @@ func (r *ScaledObjectReconciler) updateHPAIfNeeded(ctx context.Context, logger l
 		logger.Info("Updated HPA according to ScaledObject", "HPA.Namespace", foundHpa.Namespace, "HPA.Name", foundHpa.Name)
 	}
 
-	if !equality.Semantic.DeepDerivative(hpa.ObjectMeta.Labels, foundHpa.ObjectMeta.Labels) {
-		logger.V(1).Info("Found difference in the HPA labels accordint to ScaledObject", "currentHPA", foundHpa.ObjectMeta.Labels, "newHPA", hpa.ObjectMeta.Labels)
+	if !equality.Semantic.DeepDerivative(hpa.Labels, foundHpa.Labels) {
+		logger.V(1).Info("Found difference in the HPA labels accordint to ScaledObject", "currentHPA", foundHpa.Labels, "newHPA", hpa.Labels)
 		if err = r.Client.Update(ctx, hpa); err != nil {
-			foundHpa.ObjectMeta.Labels = hpa.ObjectMeta.Labels
+			foundHpa.Labels = hpa.Labels
 			logger.Error(err, "Failed to update HPA", "HPA.Namespace", foundHpa.Namespace, "HPA.Name", foundHpa.Name)
 			return err
 		}
 		logger.Info("Updated HPA according to ScaledObject", "HPA.Namespace", foundHpa.Namespace, "HPA.Name", foundHpa.Name)
 	}
 
-	if (hpa.ObjectMeta.Annotations == nil && foundHpa.ObjectMeta.Annotations != nil) ||
-		!equality.Semantic.DeepDerivative(hpa.ObjectMeta.Annotations, foundHpa.ObjectMeta.Annotations) {
-		logger.V(1).Info("Found difference in the HPA annotations according to ScaledObject", "currentHPA", foundHpa.ObjectMeta.Annotations, "newHPA", hpa.ObjectMeta.Annotations)
+	if (hpa.Annotations == nil && foundHpa.Annotations != nil) ||
+		!equality.Semantic.DeepDerivative(hpa.Annotations, foundHpa.Annotations) {
+		logger.V(1).Info("Found difference in the HPA annotations according to ScaledObject", "currentHPA", foundHpa.Annotations, "newHPA", hpa.Annotations)
 		if err = r.Client.Update(ctx, hpa); err != nil {
-			foundHpa.ObjectMeta.Annotations = hpa.ObjectMeta.Annotations
+			foundHpa.Annotations = hpa.Annotations
 			logger.Error(err, "Failed to update HPA", "HPA.Namespace", foundHpa.Namespace, "HPA.Name", foundHpa.Name)
 			return err
 		}
@@ -281,9 +341,10 @@ func (r *ScaledObjectReconciler) getScaledObjectMetricSpecs(ctx context.Context,
 			correctHpaTarget := autoscalingv2.MetricTarget{
 				Type: metricType,
 			}
-			if metricType == autoscalingv2.AverageValueMetricType {
+			switch metricType {
+			case autoscalingv2.AverageValueMetricType:
 				correctHpaTarget.AverageValue = quan
-			} else if metricType == autoscalingv2.ValueMetricType {
+			case autoscalingv2.ValueMetricType:
 				correctHpaTarget.Value = quan
 			}
 			compMetricName := kedav1alpha1.CompositeMetricName

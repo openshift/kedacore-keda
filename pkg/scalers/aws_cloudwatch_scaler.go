@@ -47,6 +47,8 @@ type awsCloudwatchMetadata struct {
 
 	AwsRegion   string `keda:"name=awsRegion,   order=triggerMetadata;authParams"`
 	AwsEndpoint string `keda:"name=awsEndpoint, order=triggerMetadata, optional"`
+
+	IdentityOwner string `keda:"name=identityOwner, order=triggerMetadata, optional"`
 }
 
 func (a *awsCloudwatchMetadata) Validate() error {
@@ -77,9 +79,6 @@ func (a *awsCloudwatchMetadata) Validate() error {
 		}
 	}
 
-	if err = checkMetricStat(a.MetricStat); err != nil {
-		return err
-	}
 	if err = checkMetricStatPeriod(a.MetricStatPeriod); err != nil {
 		return err
 	}
@@ -142,15 +141,6 @@ func parseAwsCloudwatchMetadata(config *scalersconfig.ScalerConfig) (*awsCloudwa
 	meta.triggerIndex = config.TriggerIndex
 
 	return meta, nil
-}
-
-func checkMetricStat(stat string) error {
-	for _, s := range types.Statistic("").Values() {
-		if s == types.Statistic(stat) {
-			return nil
-		}
-	}
-	return fmt.Errorf("metricStat '%s' is not one of %v", stat, types.Statistic("").Values())
 }
 
 func checkMetricUnit(unit string) error {

@@ -114,8 +114,8 @@ spec:
     name: {{.DeploymentName}}
   triggers:
   - type: cpu
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "50"
 `
 	scaledObjectTwoTriggerTemplate = `
@@ -140,8 +140,8 @@ spec:
   cooldownPeriod: 1
   triggers:
   - type: cpu
+    metricType: Utilization
     metadata:
-      type: Utilization
       value: "50"
   - type: kubernetes-workload
     metadata:
