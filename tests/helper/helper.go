@@ -270,6 +270,11 @@ func CreateNamespace(t *testing.T, kc *kubernetes.Clientset, nsName string) {
 	DeleteNamespace(t, nsName)
 	WaitForNamespaceDeletion(t, nsName)
 
+	// OpenShift 4.22: API may return NotFound but CREATE still fails with AlreadyExists.
+	// Sleep to allow finalizers and API server consistency to complete.
+	// TODO: Investigate root cause in k8s source (GET says NotFound, CREATE says AlreadyExists)
+	time.Sleep(10 * time.Second)
+
 	t.Logf("Creating namespace - %s", nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
