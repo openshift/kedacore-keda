@@ -863,10 +863,12 @@ func testScaledObjectPausedMetric(t *testing.T, data templateData) {
 
 func testOperatorMetrics(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	t.Log("--- testing operator metrics ---")
-	testOperatorMetricValues(t, kc)
+	// Use retry to wait for metrics from previous tests to be cleaned up
+	testOperatorMetricValuesWithRetry(t, kc, 30, 1)
 
 	KubectlApplyWithTemplate(t, data, "cronScaledJobTemplate", cronScaledJobTemplate)
-	testOperatorMetricValues(t, kc)
+	// Use retry to wait for metrics to reflect the new cronScaledJob
+	testOperatorMetricValuesWithRetry(t, kc, 30, 1)
 
 	KubectlDeleteWithTemplate(t, data, "cronScaledJobTemplate", cronScaledJobTemplate)
 	// Poll until Prometheus metrics reflect the deletion (max 30 seconds)
