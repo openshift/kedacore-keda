@@ -136,10 +136,12 @@ e2e-test-openshift-setup: ## Setup the tests for OpenShift
 	@echo "--- Performing Setup ---"
 	cd tests; go test -v -timeout 15m -tags e2e ./utils/setup_test.go
 
+E2E_TEST_CONFIG ?= openshift-e2e.yaml
+
 .PHONY: e2e-test-openshift
 e2e-test-openshift: ## Run tests for OpenShift
 	@echo "--- Running OpenShift KEDA Tests ---"
-	E2E_TEST_CONFIG=openshift-e2e.yaml go run -tags e2e ./tests/run-all.go
+	E2E_TEST_CONFIG=$(E2E_TEST_CONFIG) go run -tags e2e ./tests/run-all.go
 
 .PHONY: e2e-test-openshift-clean
 e2e-test-openshift-clean: ## Cleanup the test environment for OpenShift
