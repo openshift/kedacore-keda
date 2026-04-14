@@ -27,7 +27,7 @@ import (
 )
 
 var (
-	concurrentTests        = 25
+	concurrentTests        = 10 // TODO(maxcao13): openshift is too heavy for 25 concurrent tests, especially when tests do not account for kube-api race conditions
 	regularTestsTimeout    = "20m"
 	regularTestsRetries    = 3
 	sequentialTestsTimeout = "20m"
