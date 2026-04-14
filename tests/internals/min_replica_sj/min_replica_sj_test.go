@@ -142,6 +142,9 @@ func TestMinReplicaCount(t *testing.T) {
 
 	CreateKubernetesResources(t, kc, testNamespace, data, templates)
 
+	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, scalerName, testNamespace, 1, 60, 1),
+		"external scaler should be ready before proceeding")
+
 	assert.True(t, WaitForScaledJobCount(t, kc, scaledJobName, testNamespace, minReplicaCount, iterationCount, 1),
 		"job count should be %d after %d iterations", minReplicaCount, iterationCount)
 
@@ -161,6 +164,8 @@ func testMinReplicaCountWithMetricValue(t *testing.T, kc *kubernetes.Clientset, 
 
 	KubectlApplyWithTemplate(t, data, "scaledJobTemplate", scaledJobTemplate)
 	KubectlApplyWithTemplate(t, data, "updateMetricTemplate", updateMetricTemplate)
+	assert.True(t, WaitForJobSuccess(t, kc, "update-metric-value", testNamespace, 30, 2),
+		"update-metric-value job should complete")
 
 	expectedTarget := data.MinReplicaCount + data.MetricValue
 	assert.True(t, WaitForScaledJobCount(t, kc, scaledJobName, testNamespace, expectedTarget, iterationCount, 1),
@@ -177,6 +182,8 @@ func testMinReplicaCountGreaterMaxReplicaCountScalesOnlyToMaxReplicaCount(t *tes
 
 	KubectlApplyWithTemplate(t, data, "scaledJobTemplate", scaledJobTemplate)
 	KubectlApplyWithTemplate(t, data, "updateMetricTemplate", updateMetricTemplate)
+	assert.True(t, WaitForJobSuccess(t, kc, "update-metric-value", testNamespace, 30, 2),
+		"update-metric-value job should complete")
 
 	assert.True(t, WaitForScaledJobCount(t, kc, scaledJobName, testNamespace, data.MaxReplicaCount, iterationCount, 1),
 		"job count should be %d after %d iterations", data.MaxReplicaCount, iterationCount)
@@ -192,6 +199,8 @@ func testMinReplicaCountWithMetricValueGreaterMaxReplicaCountScalesOnlyToMaxRepl
 
 	KubectlApplyWithTemplate(t, data, "scaledJobTemplate", scaledJobTemplate)
 	KubectlApplyWithTemplate(t, data, "updateMetricTemplate", updateMetricTemplate)
+	assert.True(t, WaitForJobSuccess(t, kc, "update-metric-value", testNamespace, 30, 2),
+		"update-metric-value job should complete")
 
 	assert.True(t, WaitForScaledJobCount(t, kc, scaledJobName, testNamespace, data.MaxReplicaCount, iterationCount, 1),
 		"job count should be %d after %d iterations", data.MaxReplicaCount, iterationCount)
