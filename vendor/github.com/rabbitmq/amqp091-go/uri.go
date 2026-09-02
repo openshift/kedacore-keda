@@ -14,8 +14,10 @@ import (
 	"strings"
 )
 
-var errURIScheme = errors.New("AMQP scheme must be either 'amqp://' or 'amqps://'")
-var errURIWhitespace = errors.New("URI must not contain whitespace")
+var (
+	errURIScheme     = errors.New("AMQP scheme must be either 'amqp://' or 'amqps://'")
+	errURIWhitespace = errors.New("URI must not contain whitespace")
+)
 
 var schemePorts = map[string]int{
 	"amqp":  5672,
@@ -164,7 +166,7 @@ func ParseURI(uri string) (URI, error) {
 	if params.Has("channel_max") {
 		value, err := strconv.ParseUint(params.Get("channel_max"), 10, 16)
 		if err != nil {
-			return builder, fmt.Errorf("connection_timeout is not an integer: %v", err)
+			return builder, fmt.Errorf("channel_max is not an uint16: %v", err)
 		}
 		builder.ChannelMax = uint16(value)
 	}
@@ -227,27 +229,20 @@ func (uri URI) String() string {
 	}
 
 	if uri.CertFile != "" || uri.KeyFile != "" || uri.CACertFile != "" || uri.ServerName != "" {
-		rawQuery := strings.Builder{}
+		q := url.Values{}
 		if uri.CertFile != "" {
-			rawQuery.WriteString("certfile=")
-			rawQuery.WriteString(uri.CertFile)
-			rawQuery.WriteRune('&')
+			q.Set("certfile", uri.CertFile)
 		}
 		if uri.KeyFile != "" {
-			rawQuery.WriteString("keyfile=")
-			rawQuery.WriteString(uri.KeyFile)
-			rawQuery.WriteRune('&')
+			q.Set("keyfile", uri.KeyFile)
 		}
 		if uri.CACertFile != "" {
-			rawQuery.WriteString("cacertfile=")
-			rawQuery.WriteString(uri.CACertFile)
-			rawQuery.WriteRune('&')
+			q.Set("cacertfile", uri.CACertFile)
 		}
 		if uri.ServerName != "" {
-			rawQuery.WriteString("server_name_indication=")
-			rawQuery.WriteString(uri.ServerName)
+			q.Set("server_name_indication", uri.ServerName)
 		}
-		authority.RawQuery = rawQuery.String()
+		authority.RawQuery = q.Encode()
 	}
 
 	return authority.String()
