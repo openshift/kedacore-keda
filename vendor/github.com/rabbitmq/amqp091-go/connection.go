@@ -605,23 +605,14 @@ func (c *Connection) Close() error {
 	}
 	defer unlock()
 
-	var handshakeErr error
-	var initiated bool
-	c.closeOnce.Do(func() {
-		initiated = true
-		defer c.shutdown(nil)
-		handshakeErr = c.call(
-			&connectionClose{
-				ReplyCode: replySuccess,
-				ReplyText: "kthxbai",
-			},
-			&connectionCloseOk{},
-		)
-	})
-	if !initiated {
-		return ErrClosed
-	}
-	return handshakeErr
+	defer c.shutdown(nil)
+	return c.call(
+		&connectionClose{
+			ReplyCode: replySuccess,
+			ReplyText: "kthxbai",
+		},
+		&connectionCloseOk{},
+	)
 }
 
 // CloseDeadline requests and waits for the response to close this AMQP connection.

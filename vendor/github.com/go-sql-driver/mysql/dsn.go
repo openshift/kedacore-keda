@@ -15,7 +15,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"maps"
 	"math/big"
 	"net"
 	"net/url"
@@ -158,7 +157,9 @@ func (cfg *Config) Clone() *Config {
 	}
 	if len(cp.Params) > 0 {
 		cp.Params = make(map[string]string, len(cfg.Params))
-		maps.Copy(cp.Params, cfg.Params)
+		for k, v := range cfg.Params {
+			cp.Params[k] = v
+		}
 	}
 	if cfg.pubKey != nil {
 		cp.pubKey = &rsa.PublicKey{
@@ -413,7 +414,7 @@ func ParseDSN(dsn string) (cfg *Config, err error) {
 					if dsn[j] == '@' {
 						// username[:password]
 						// Find the first ':' in dsn[:j]
-						for k = 0; k < j; k++ { // We cannot use k = range j here, because we use dsn[:k] below
+						for k = 0; k < j; k++ {
 							if dsn[k] == ':' {
 								cfg.Passwd = dsn[k+1 : j]
 								break
@@ -476,7 +477,7 @@ func ParseDSN(dsn string) (cfg *Config, err error) {
 // parseDSNParams parses the DSN "query string"
 // Values must be url.QueryEscape'ed
 func parseDSNParams(cfg *Config, params string) (err error) {
-	for v := range strings.SplitSeq(params, "&") {
+	for _, v := range strings.Split(params, "&") {
 		key, value, found := strings.Cut(v, "=")
 		if !found {
 			continue

@@ -179,22 +179,20 @@ func (mc *mysqlConn) writePacket(data []byte) error {
 ******************************************************************************/
 
 // Handshake Initialization Packet
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
-// https://mariadb.com/kb/en/connection/#initial-handshake-packet
-func (mc *mysqlConn) readHandshakePacket() (data []byte, capabilities capabilityFlag, extendedCapabilities extendedCapabilityFlag, plugin string, err error) {
+// http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::Handshake
+func (mc *mysqlConn) readHandshakePacket() (data []byte, plugin string, err error) {
 	data, err = mc.readPacket()
 	if err != nil {
 		return
 	}
 
 	if data[0] == iERR {
-		err = mc.handleErrorPacket(data)
-		return
+		return nil, "", mc.handleErrorPacket(data)
 	}
 
 	// protocol version [1 byte]
 	if data[0] < minProtocolVersion {
-		return nil, 0, 0, "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"unsupported protocol version %d. Version %d or higher is required",
 			data[0],
 			minProtocolVersion,
@@ -212,15 +210,15 @@ func (mc *mysqlConn) readHandshakePacket() (data []byte, capabilities capability
 	pos += 8 + 1
 
 	// capability flags (lower 2 bytes) [2 bytes]
-	capabilities = capabilityFlag(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	if capabilities&clientProtocol41 == 0 {
-		return nil, capabilities, 0, "", ErrOldProtocol
+	mc.flags = clientFlag(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	if mc.flags&clientProtocol41 == 0 {
+		return nil, "", ErrOldProtocol
 	}
-	if capabilities&clientSSL == 0 && mc.cfg.TLS != nil {
+	if mc.flags&clientSSL == 0 && mc.cfg.TLS != nil {
 		if mc.cfg.AllowFallbackToPlaintext {
 			mc.cfg.TLS = nil
 		} else {
-			return nil, capabilities, 0, "", ErrNoTLS
+			return nil, "", ErrNoTLS
 		}
 	}
 	pos += 2
@@ -230,16 +228,11 @@ func (mc *mysqlConn) readHandshakePacket() (data []byte, capabilities capability
 		// status flags [2 bytes]
 		pos += 3
 		// capability flags (upper 2 bytes) [2 bytes]
-		capabilities |= capabilityFlag(binary.LittleEndian.Uint16(data[pos:pos+2])) << 16
+		mc.flags |= clientFlag(binary.LittleEndian.Uint16(data[pos:pos+2])) << 16
 		pos += 2
 		// length of auth-plugin-data [1 byte]
-		// reserved (all [00]) [6 bytes]
-		pos += 7
-		if capabilities&clientMySQL == 0 {
-			// MariaDB server extended flag
-			extendedCapabilities = extendedCapabilityFlag(binary.LittleEndian.Uint32(data[pos : pos+4]))
-		}
-		pos += 4
+		// reserved (all [00]) [10 bytes]
+		pos += 11
 
 		// second part of the password cipher [minimum 13 bytes],
 		// where len=MAX(13, length of auth-plugin-data - 8)
@@ -267,72 +260,82 @@ func (mc *mysqlConn) readHandshakePacket() (data []byte, capabilities capability
 		// make a memory safe copy of the cipher slice
 		var b [20]byte
 		copy(b[:], authData)
-		return b[:], capabilities, extendedCapabilities, plugin, nil
+		return b[:], plugin, nil
 	}
 
 	// make a memory safe copy of the cipher slice
 	var b [8]byte
 	copy(b[:], authData)
-	return b[:], capabilities, 0, plugin, nil
-}
-
-// initCapabilities initializes the capabilities based on server support and configuration
-func (mc *mysqlConn) initCapabilities(serverCapabilities capabilityFlag, serverExtCapabilities extendedCapabilityFlag, cfg *Config) {
-	clientCapabilities :=
-		clientMySQL |
-			clientLongFlag |
-			clientProtocol41 |
-			clientSecureConn |
-			clientTransactions |
-			clientPluginAuthLenEncClientData |
-			clientLocalFiles |
-			clientPluginAuth |
-			clientMultiResults |
-			clientConnectAttrs |
-			clientDeprecateEOF
-
-	if cfg.ClientFoundRows {
-		clientCapabilities |= clientFoundRows
-	}
-	if cfg.compress {
-		clientCapabilities |= clientCompress
-	}
-	// To enable TLS / SSL
-	if mc.cfg.TLS != nil {
-		clientCapabilities |= clientSSL
-	}
-
-	if mc.cfg.MultiStatements {
-		clientCapabilities |= clientMultiStatements
-	}
-	if n := len(cfg.DBName); n > 0 {
-		clientCapabilities |= clientConnectWithDB
-	}
-
-	// only keep client capabilities that server have
-	mc.capabilities = clientCapabilities & serverCapabilities
-
-	// set MariaDB extended clientCacheMetadata capability if server support it
-	mc.extCapabilities = clientCacheMetadata & serverExtCapabilities
+	return b[:], plugin, nil
 }
 
 // Client Authentication Packet
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_response.html
+// http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse
 func (mc *mysqlConn) writeHandshakeResponsePacket(authResp []byte, plugin string) error {
-	// packet header  4
-	// capabilities   4
-	// maxPacketSize  4
-	// collation id   1
-	// filler        23
-	data, err := mc.buf.takeSmallBuffer(4*3 + 24)
+	// Adjust client flags based on server support
+	clientFlags := clientProtocol41 |
+		clientSecureConn |
+		clientLongPassword |
+		clientTransactions |
+		clientLocalFiles |
+		clientPluginAuth |
+		clientMultiResults |
+		mc.flags&clientConnectAttrs |
+		mc.flags&clientLongFlag
+
+	sendConnectAttrs := mc.flags&clientConnectAttrs != 0
+
+	if mc.cfg.ClientFoundRows {
+		clientFlags |= clientFoundRows
+	}
+	if mc.cfg.compress && mc.flags&clientCompress == clientCompress {
+		clientFlags |= clientCompress
+	}
+	// To enable TLS / SSL
+	if mc.cfg.TLS != nil {
+		clientFlags |= clientSSL
+	}
+
+	if mc.cfg.MultiStatements {
+		clientFlags |= clientMultiStatements
+	}
+
+	// encode length of the auth plugin data
+	var authRespLEIBuf [9]byte
+	authRespLen := len(authResp)
+	authRespLEI := appendLengthEncodedInteger(authRespLEIBuf[:0], uint64(authRespLen))
+	if len(authRespLEI) > 1 {
+		// if the length can not be written in 1 byte, it must be written as a
+		// length encoded integer
+		clientFlags |= clientPluginAuthLenEncClientData
+	}
+
+	pktLen := 4 + 4 + 1 + 23 + len(mc.cfg.User) + 1 + len(authRespLEI) + len(authResp) + 21 + 1
+
+	// To specify a db name
+	if n := len(mc.cfg.DBName); n > 0 {
+		clientFlags |= clientConnectWithDB
+		pktLen += n + 1
+	}
+
+	// encode length of the connection attributes
+	var connAttrsLEI []byte
+	if sendConnectAttrs {
+		var connAttrsLEIBuf [9]byte
+		connAttrsLen := len(mc.connector.encodedAttributes)
+		connAttrsLEI = appendLengthEncodedInteger(connAttrsLEIBuf[:0], uint64(connAttrsLen))
+		pktLen += len(connAttrsLEI) + len(mc.connector.encodedAttributes)
+	}
+
+	// Calculate packet length and get buffer with that size
+	data, err := mc.buf.takeBuffer(pktLen + 4)
 	if err != nil {
 		mc.cleanup()
 		return err
 	}
-	_ = data[4*3+23] // boundery check
 
-	// clientCapabilities [32 bit]
-	binary.LittleEndian.PutUint32(data[4:], uint32(mc.capabilities))
+	// ClientFlags [32 bit]
+	binary.LittleEndian.PutUint32(data[4:], uint32(clientFlags))
 
 	// MaxPacketSize [32 bit] (none)
 	binary.LittleEndian.PutUint32(data[8:], 0)
@@ -350,26 +353,16 @@ func (mc *mysqlConn) writeHandshakeResponsePacket(authResp []byte, plugin string
 	}
 
 	// Filler [23 bytes] (all 0x00)
-	// or filler 19bytes + mariadb extCapabilities
 	pos := 13
-	if mc.capabilities&clientMySQL == 0 {
-		for ; pos < 13+19; pos++ {
-			data[pos] = 0
-		}
-		// MariaDB Extended Capabilities
-		binary.LittleEndian.PutUint32(data[13+19:], uint32(mc.extCapabilities))
-	} else {
-		for ; pos < 13+23; pos++ {
-			data[pos] = 0
-		}
+	for ; pos < 13+23; pos++ {
+		data[pos] = 0
 	}
 
 	// SSL Connection Request Packet
-	// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_ssl_request.html
-	// https://mariadb.com/kb/en/connection/#sslrequest-packet
+	// http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::SSLRequest
 	if mc.cfg.TLS != nil {
 		// Send TLS / SSL request packet
-		if err := mc.writePacket(data); err != nil {
+		if err := mc.writePacket(data[:(4+4+1+23)+4]); err != nil {
 			return err
 		}
 
@@ -386,35 +379,37 @@ func (mc *mysqlConn) writeHandshakeResponsePacket(authResp []byte, plugin string
 
 	// User [null terminated string]
 	if len(mc.cfg.User) > 0 {
-		data = append(data, mc.cfg.User...)
+		pos += copy(data[pos:], mc.cfg.User)
 	}
-	data = append(data, 0)
+	data[pos] = 0x00
+	pos++
 
 	// Auth Data [length encoded integer]
-	data = appendLengthEncodedInteger(data, uint64(len(authResp)))
-	data = append(data, authResp...)
+	pos += copy(data[pos:], authRespLEI)
+	pos += copy(data[pos:], authResp)
 
-	// Database name [null terminated string]
-	if mc.capabilities&clientConnectWithDB != 0 {
-		data = append(data, mc.cfg.DBName...)
-		data = append(data, 0)
+	// Databasename [null terminated string]
+	if len(mc.cfg.DBName) > 0 {
+		pos += copy(data[pos:], mc.cfg.DBName)
+		data[pos] = 0x00
+		pos++
 	}
 
-	data = append(data, plugin...)
-	data = append(data, 0)
+	pos += copy(data[pos:], plugin)
+	data[pos] = 0x00
+	pos++
 
 	// Connection Attributes
-	if mc.capabilities&clientConnectAttrs != 0 {
-		connAttrsLen := len(mc.connector.encodedAttributes)
-		data = appendLengthEncodedInteger(data, uint64(connAttrsLen))
-		data = append(data, mc.connector.encodedAttributes...)
+	if sendConnectAttrs {
+		pos += copy(data[pos:], connAttrsLEI)
+		pos += copy(data[pos:], []byte(mc.connector.encodedAttributes))
 	}
 
 	// Send Auth packet
-	return mc.writePacket(data)
+	return mc.writePacket(data[:pos])
 }
 
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_switch_response.html
+// http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::AuthSwitchResponse
 func (mc *mysqlConn) writeAuthSwitchPacket(authData []byte) error {
 	pktLen := 4 + len(authData)
 	data, err := mc.buf.takeBuffer(pktLen)
@@ -516,7 +511,7 @@ func (mc *mysqlConn) readAuthResult() ([]byte, string, error) {
 
 	case iEOF:
 		if len(data) == 1 {
-			// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_old_auth_switch_request.html
+			// https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::OldAuthSwitchRequest
 			return nil, "mysql_old_password", nil
 		}
 		pluginEndIndex := bytes.IndexByte(data, 0x00)
@@ -550,41 +545,36 @@ func (mc *okHandler) readResultOK() error {
 
 // Result Set Header Packet
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response.html
-func (mc *okHandler) readResultSetHeaderPacket() (int, bool, error) {
+func (mc *okHandler) readResultSetHeaderPacket() (int, error) {
 	// handleOkPacket replaces both values; other cases leave the values unchanged.
 	mc.result.affectedRows = append(mc.result.affectedRows, 0)
 	mc.result.insertIds = append(mc.result.insertIds, 0)
 
 	data, err := mc.conn().readPacket()
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 
 	switch data[0] {
 	case iOK:
-		return 0, false, mc.handleOkPacket(data)
+		return 0, mc.handleOkPacket(data)
 
 	case iERR:
-		return 0, false, mc.conn().handleErrorPacket(data)
+		return 0, mc.conn().handleErrorPacket(data)
 
 	case iLocalInFile:
-		return 0, false, mc.handleInFileRequest(string(data[1:]))
+		return 0, mc.handleInFileRequest(string(data[1:]))
 	}
 
 	// column count
 	// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset.html
-	// https://mariadb.com/kb/en/result-set-packets/#column-count-packet
-	num, _, len := readLengthEncodedInteger(data)
-
-	if mc.extCapabilities&clientCacheMetadata != 0 {
-		return int(num), data[len] == 0x01, nil
-	}
+	num, _, _ := readLengthEncodedInteger(data)
 	// ignore remaining data in the packet. see #1478.
-	return int(num), true, nil
+	return int(num), nil
 }
 
 // Error Packet
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_err_packet.html
+// http://dev.mysql.com/doc/internals/en/generic-response-packets.html#packet-ERR_Packet
 func (mc *mysqlConn) handleErrorPacket(data []byte) error {
 	if data[0] != iERR {
 		return ErrMalformPkt
@@ -666,7 +656,7 @@ func (mc *mysqlConn) clearResult() *okHandler {
 }
 
 // Ok Packet
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_ok_packet.html
+// http://dev.mysql.com/doc/internals/en/generic-response-packets.html#packet-OK_Packet
 func (mc *okHandler) handleOkPacket(data []byte) error {
 	var n, m int
 	var affectedRows, insertId uint64
@@ -700,17 +690,22 @@ func (mc *okHandler) handleOkPacket(data []byte) error {
 }
 
 // Read Packets as Field Packets until EOF-Packet or an Error appears
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html#sect_protocol_com_query_response_text_resultset_column_definition_41
-func (mc *mysqlConn) readColumns(count int, old []mysqlField) ([]mysqlField, error) {
+// http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-Protocol::ColumnDefinition41
+func (mc *mysqlConn) readColumns(count int) ([]mysqlField, error) {
 	columns := make([]mysqlField, count)
-	if len(old) != count {
-		old = nil
-	}
 
-	for i := range count {
+	for i := 0; ; i++ {
 		data, err := mc.readPacket()
 		if err != nil {
 			return nil, err
+		}
+
+		// EOF Packet
+		if data[0] == iEOF && (len(data) == 5 || len(data) == 1) {
+			if i == count {
+				return columns, nil
+			}
+			return nil, fmt.Errorf("column count mismatch n:%d len:%d", count, len(columns))
 		}
 
 		// Catalog
@@ -733,12 +728,7 @@ func (mc *mysqlConn) readColumns(count int, old []mysqlField) ([]mysqlField, err
 				return nil, err
 			}
 			pos += n
-			if old != nil && old[i].tableName == string(tableName) {
-				// avoid allocating new string
-				columns[i].tableName = old[i].tableName
-			} else {
-				columns[i].tableName = string(tableName)
-			}
+			columns[i].tableName = string(tableName)
 		} else {
 			n, err = skipLengthEncodedString(data[pos:])
 			if err != nil {
@@ -759,12 +749,7 @@ func (mc *mysqlConn) readColumns(count int, old []mysqlField) ([]mysqlField, err
 		if err != nil {
 			return nil, err
 		}
-		if old != nil && old[i].name == string(name) {
-			// avoid allocating new string
-			columns[i].name = old[i].name
-		} else {
-			columns[i].name = string(name)
-		}
+		columns[i].name = string(name)
 		pos += n
 
 		// Original name [len coded string]
@@ -795,17 +780,17 @@ func (mc *mysqlConn) readColumns(count int, old []mysqlField) ([]mysqlField, err
 
 		// Decimals [uint8]
 		columns[i].decimals = data[pos]
-	}
+		//pos++
 
-	// skip EOF packet if client does not support deprecateEOF
-	if err := mc.skipEof(); err != nil {
-		return nil, err
+		// Default value [len coded binary]
+		//if pos < len(data) {
+		//	defaultVal, _, err = bytesToLengthCodedBinary(data[pos:])
+		//}
 	}
-	return columns, nil
 }
 
 // Read Packets as Field Packets until EOF-Packet or an Error appears
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_row.html
+// http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow
 func (rows *textRows) readRow(dest []driver.Value) error {
 	mc := rows.mc
 
@@ -819,20 +804,9 @@ func (rows *textRows) readRow(dest []driver.Value) error {
 	}
 
 	// EOF Packet
-	// text row packets may starts with LengthEncodedString.
-	// In such case, 0xFE can mean string larger than 0xffffff.
-	// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_dt_integers.html#sect_protocol_basic_dt_int_le
-	if data[0] == iEOF && len(data) <= 0xffffff {
-		if mc.capabilities&clientDeprecateEOF == 0 {
-			// Deprecated EOF packet
-			// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_eof_packet.html
-			mc.status = readStatus(data[3:])
-		} else {
-			// Ok Packet with an 0xFE header
-			_, _, n := readLengthEncodedInteger(data[1:])   // affected_rows
-			_, _, m := readLengthEncodedInteger(data[1+n:]) // last_insert_id
-			mc.status = readStatus(data[1+n+m:])
-		}
+	if data[0] == iEOF && len(data) == 5 {
+		// server_status [2 bytes]
+		rows.mc.status = readStatus(data[3:])
 		rows.rs.done = true
 		if !rows.HasNextResultSet() {
 			rows.mc = nil
@@ -906,34 +880,8 @@ func (rows *textRows) readRow(dest []driver.Value) error {
 	return nil
 }
 
-func (mc *mysqlConn) skipPackets(n int) error {
-	for range n {
-		if _, err := mc.readPacket(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// skips EOF packet after n * ColumnDefinition packets when clientDeprecateEOF is not set
-func (mc *mysqlConn) skipEof() error {
-	if mc.capabilities&clientDeprecateEOF == 0 {
-		if _, err := mc.readPacket(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (mc *mysqlConn) skipColumns(n int) error {
-	if err := mc.skipPackets(n); err != nil {
-		return err
-	}
-	return mc.skipEof()
-}
-
-// Reads Packets until EOF-Packet or an Error appears.
-func (mc *mysqlConn) skipRows() error {
+// Reads Packets until EOF-Packet or an Error appears. Returns count of Packets read
+func (mc *mysqlConn) readUntilEOF() error {
 	for {
 		data, err := mc.readPacket()
 		if err != nil {
@@ -944,20 +892,10 @@ func (mc *mysqlConn) skipRows() error {
 		case iERR:
 			return mc.handleErrorPacket(data)
 		case iEOF:
-			// text row packets may starts with LengthEncodedString.
-			// In such case, 0xFE can mean string larger than 0xffffff.
-			if len(data) <= 0xffffff {
-				if mc.capabilities&clientDeprecateEOF == 0 {
-					// EOF packet
-					mc.status = readStatus(data[3:])
-				} else {
-					// OK packet with an 0xFE header
-					_, _, n := readLengthEncodedInteger(data[1:])   // affected_rows
-					_, _, m := readLengthEncodedInteger(data[1+n:]) // last_insert_id
-					mc.status = readStatus(data[1+n+m:])
-				}
-				return nil
+			if len(data) == 5 {
+				mc.status = readStatus(data[3:])
 			}
+			return nil
 		}
 	}
 }
@@ -967,7 +905,7 @@ func (mc *mysqlConn) skipRows() error {
 ******************************************************************************/
 
 // Prepare Result Packets
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_prepare.html#sect_protocol_com_stmt_prepare_response
+// http://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html
 func (stmt *mysqlStmt) readPrepareResultPacket() (uint16, error) {
 	data, err := stmt.mc.readPacket()
 	if err == nil {
@@ -994,7 +932,7 @@ func (stmt *mysqlStmt) readPrepareResultPacket() (uint16, error) {
 	return 0, err
 }
 
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_send_long_data.html
+// http://dev.mysql.com/doc/internals/en/com-stmt-send-long-data.html
 func (stmt *mysqlStmt) writeCommandLongData(paramID int, arg []byte) error {
 	maxLen := stmt.mc.maxAllowedPacket - 1
 	pktLen := maxLen
@@ -1041,7 +979,7 @@ func (stmt *mysqlStmt) writeCommandLongData(paramID int, arg []byte) error {
 }
 
 // Execute Prepared Statement
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
+// http://dev.mysql.com/doc/internals/en/com-stmt-execute.html
 func (stmt *mysqlStmt) writeExecutePacket(args []driver.Value) error {
 	if len(args) != stmt.paramCount {
 		return fmt.Errorf(
@@ -1055,7 +993,10 @@ func (stmt *mysqlStmt) writeExecutePacket(args []driver.Value) error {
 	mc := stmt.mc
 
 	// Determine threshold dynamically to avoid packet size shortage.
-	longDataSize := max(mc.maxAllowedPacket/(stmt.paramCount+1), 64)
+	longDataSize := mc.maxAllowedPacket / (stmt.paramCount + 1)
+	if longDataSize < 64 {
+		longDataSize = 64
+	}
 
 	// Reset packet-sequence
 	mc.resetSequence()
@@ -1244,17 +1185,17 @@ func (stmt *mysqlStmt) writeExecutePacket(args []driver.Value) error {
 // mc.affectedRows and mc.insertIds.
 func (mc *okHandler) discardResults() error {
 	for mc.status&statusMoreResultsExists != 0 {
-		resLen, _, err := mc.readResultSetHeaderPacket()
+		resLen, err := mc.readResultSetHeaderPacket()
 		if err != nil {
 			return err
 		}
 		if resLen > 0 {
 			// columns
-			if err := mc.conn().skipColumns(resLen); err != nil {
+			if err := mc.conn().readUntilEOF(); err != nil {
 				return err
 			}
 			// rows
-			if err := mc.conn().skipRows(); err != nil {
+			if err := mc.conn().readUntilEOF(); err != nil {
 				return err
 			}
 		}
@@ -1262,7 +1203,7 @@ func (mc *okHandler) discardResults() error {
 	return nil
 }
 
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row
+// http://dev.mysql.com/doc/internals/en/binary-protocol-resultset-row.html
 func (rows *binaryRows) readRow(dest []driver.Value) error {
 	data, err := rows.mc.readPacket()
 	if err != nil {
@@ -1271,17 +1212,9 @@ func (rows *binaryRows) readRow(dest []driver.Value) error {
 
 	// packet indicator [1 byte]
 	if data[0] != iOK {
-		// EOF/OK Packet
-		if data[0] == iEOF {
-			if rows.mc.capabilities&clientDeprecateEOF == 0 {
-				// EOF packet
-				rows.mc.status = readStatus(data[3:])
-			} else {
-				// OK Packet with an 0xFE header
-				_, _, n := readLengthEncodedInteger(data[1:])
-				_, _, m := readLengthEncodedInteger(data[1+n:])
-				rows.mc.status = readStatus(data[1+n+m:])
-			}
+		// EOF Packet
+		if data[0] == iEOF && len(data) == 5 {
+			rows.mc.status = readStatus(data[3:])
 			rows.rs.done = true
 			if !rows.HasNextResultSet() {
 				rows.mc = nil

@@ -33,8 +33,7 @@ type mysqlConn struct {
 	connector        *connector
 	maxAllowedPacket int
 	maxWriteSize     int
-	capabilities     capabilityFlag
-	extCapabilities  extendedCapabilityFlag
+	flags            clientFlag
 	status           statusFlag
 	sequence         uint8
 	compressSequence uint8
@@ -172,7 +171,7 @@ func (mc *mysqlConn) close() {
 }
 
 // Closes the network connection and unsets internal variables. Do not call this
-// function after successful authentication, call Close instead. This function
+// function after successfully authentication, call Close instead. This function
 // is called before auth or on auth failure because MySQL will have already
 // closed the network connection.
 func (mc *mysqlConn) cleanup() {
@@ -224,21 +223,13 @@ func (mc *mysqlConn) Prepare(query string) (driver.Stmt, error) {
 	columnCount, err := stmt.readPrepareResultPacket()
 	if err == nil {
 		if stmt.paramCount > 0 {
-			if err = mc.skipColumns(stmt.paramCount); err != nil {
+			if err = mc.readUntilEOF(); err != nil {
 				return nil, err
 			}
 		}
 
 		if columnCount > 0 {
-			if mc.extCapabilities&clientCacheMetadata != 0 {
-				if stmt.columns, err = mc.readColumns(int(columnCount), nil); err != nil {
-					return nil, err
-				}
-			} else {
-				if err = mc.skipColumns(int(columnCount)); err != nil {
-					return nil, err
-				}
-			}
+			err = mc.readUntilEOF()
 		}
 	}
 
@@ -246,184 +237,100 @@ func (mc *mysqlConn) Prepare(query string) (driver.Stmt, error) {
 }
 
 func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (string, error) {
-	noBackslashEscapes := (mc.status & statusNoBackslashEscapes) != 0
-	const (
-		stateNormal = iota
-		stateString
-		stateEscape
-		stateEOLComment
-		stateSlashStarComment
-		stateBacktick
-	)
-
-	const (
-		QUOTE_BYTE         = byte('\'')
-		DBL_QUOTE_BYTE     = byte('"')
-		BACKSLASH_BYTE     = byte('\\')
-		QUESTION_MARK_BYTE = byte('?')
-		SLASH_BYTE         = byte('/')
-		STAR_BYTE          = byte('*')
-		HASH_BYTE          = byte('#')
-		MINUS_BYTE         = byte('-')
-		LINE_FEED_BYTE     = byte('\n')
-		BACKTICK_BYTE      = byte('`')
-	)
+	// Number of ? should be same to len(args)
+	if strings.Count(query, "?") != len(args) {
+		return "", driver.ErrSkip
+	}
 
 	buf, err := mc.buf.takeCompleteBuffer()
 	if err != nil {
+		// can not take the buffer. Something must be wrong with the connection
 		mc.cleanup()
+		// interpolateParams would be called before sending any query.
+		// So its safe to retry.
 		return "", driver.ErrBadConn
 	}
 	buf = buf[:0]
-	state := stateNormal
-	singleQuotes := false
-	lastChar := byte(0)
 	argPos := 0
-	lenQuery := len(query)
-	lastIdx := 0
 
-	for i := range lenQuery {
-		currentChar := query[i]
-		if state == stateEscape && !((currentChar == QUOTE_BYTE && singleQuotes) || (currentChar == DBL_QUOTE_BYTE && !singleQuotes)) {
-			state = stateString
-			lastChar = currentChar
+	for i := 0; i < len(query); i++ {
+		q := strings.IndexByte(query[i:], '?')
+		if q == -1 {
+			buf = append(buf, query[i:]...)
+			break
+		}
+		buf = append(buf, query[i:i+q]...)
+		i += q
+
+		arg := args[argPos]
+		argPos++
+
+		if arg == nil {
+			buf = append(buf, "NULL"...)
 			continue
 		}
-		switch currentChar {
-		case STAR_BYTE:
-			if state == stateNormal && lastChar == SLASH_BYTE {
-				state = stateSlashStarComment
+
+		switch v := arg.(type) {
+		case int64:
+			buf = strconv.AppendInt(buf, v, 10)
+		case uint64:
+			// Handle uint64 explicitly because our custom ConvertValue emits unsigned values
+			buf = strconv.AppendUint(buf, v, 10)
+		case float64:
+			buf = strconv.AppendFloat(buf, v, 'g', -1, 64)
+		case bool:
+			if v {
+				buf = append(buf, '1')
+			} else {
+				buf = append(buf, '0')
 			}
-		case SLASH_BYTE:
-			if state == stateSlashStarComment && lastChar == STAR_BYTE {
-				state = stateNormal
-				// Clear lastChar so the '/' that closed the comment isn't
-				// reused to start a new comment with a following '*'.
-				lastChar = 0
-				continue
+		case time.Time:
+			if v.IsZero() {
+				buf = append(buf, "'0000-00-00'"...)
+			} else {
+				buf = append(buf, '\'')
+				buf, err = appendDateTime(buf, v.In(mc.cfg.Loc), mc.cfg.timeTruncate)
+				if err != nil {
+					return "", err
+				}
+				buf = append(buf, '\'')
 			}
-		case HASH_BYTE:
-			if state == stateNormal {
-				state = stateEOLComment
+		case json.RawMessage:
+			buf = append(buf, '\'')
+			if mc.status&statusNoBackslashEscapes == 0 {
+				buf = escapeBytesBackslash(buf, v)
+			} else {
+				buf = escapeBytesQuotes(buf, v)
 			}
-		case MINUS_BYTE:
-			if state == stateNormal && lastChar == MINUS_BYTE {
-				// -- only starts a comment if followed by whitespace or control char
-				if i+1 < lenQuery {
-					nextChar := query[i+1]
-					if nextChar == ' ' || nextChar == '\t' || nextChar == '\n' || nextChar == '\r' {
-						state = stateEOLComment
-					}
+			buf = append(buf, '\'')
+		case []byte:
+			if v == nil {
+				buf = append(buf, "NULL"...)
+			} else {
+				buf = append(buf, "_binary'"...)
+				if mc.status&statusNoBackslashEscapes == 0 {
+					buf = escapeBytesBackslash(buf, v)
 				} else {
-					state = stateEOLComment
+					buf = escapeBytesQuotes(buf, v)
 				}
+				buf = append(buf, '\'')
 			}
-		case LINE_FEED_BYTE:
-			if state == stateEOLComment {
-				state = stateNormal
+		case string:
+			buf = append(buf, '\'')
+			if mc.status&statusNoBackslashEscapes == 0 {
+				buf = escapeStringBackslash(buf, v)
+			} else {
+				buf = escapeStringQuotes(buf, v)
 			}
-		case DBL_QUOTE_BYTE:
-			if state == stateNormal {
-				state = stateString
-				singleQuotes = false
-			} else if state == stateString && !singleQuotes {
-				state = stateNormal
-			} else if state == stateEscape {
-				state = stateString
-			}
-		case QUOTE_BYTE:
-			if state == stateNormal {
-				state = stateString
-				singleQuotes = true
-			} else if state == stateString && singleQuotes {
-				state = stateNormal
-			} else if state == stateEscape {
-				state = stateString
-			}
-		case BACKSLASH_BYTE:
-			if state == stateString && !noBackslashEscapes {
-				state = stateEscape
-			}
-		case QUESTION_MARK_BYTE:
-			if state == stateNormal {
-				if argPos >= len(args) {
-					return "", driver.ErrSkip
-				}
-				buf = append(buf, query[lastIdx:i]...)
-				arg := args[argPos]
-				argPos++
-
-				if arg == nil {
-					buf = append(buf, "NULL"...)
-					lastIdx = i + 1
-					break
-				}
-
-				switch v := arg.(type) {
-				case int64:
-					buf = strconv.AppendInt(buf, v, 10)
-				case uint64:
-					buf = strconv.AppendUint(buf, v, 10)
-				case float64:
-					buf = strconv.AppendFloat(buf, v, 'g', -1, 64)
-				case bool:
-					if v {
-						buf = append(buf, '1')
-					} else {
-						buf = append(buf, '0')
-					}
-				case time.Time:
-					if v.IsZero() {
-						buf = append(buf, "'0000-00-00'"...)
-					} else {
-						buf = append(buf, '\'')
-						buf, err = appendDateTime(buf, v.In(mc.cfg.Loc), mc.cfg.timeTruncate)
-						if err != nil {
-							return "", err
-						}
-						buf = append(buf, '\'')
-					}
-				case json.RawMessage:
-					if noBackslashEscapes {
-						buf = escapeBytesQuotes(buf, v, false)
-					} else {
-						buf = escapeBytesBackslash(buf, v, false)
-					}
-				case []byte:
-					if v == nil {
-						buf = append(buf, "NULL"...)
-					} else {
-						if noBackslashEscapes {
-							buf = escapeBytesQuotes(buf, v, true)
-						} else {
-							buf = escapeBytesBackslash(buf, v, true)
-						}
-					}
-				case string:
-					if noBackslashEscapes {
-						buf = escapeStringQuotes(buf, v)
-					} else {
-						buf = escapeStringBackslash(buf, v)
-					}
-				default:
-					return "", driver.ErrSkip
-				}
-
-				if len(buf)+4 > mc.maxAllowedPacket {
-					return "", driver.ErrSkip
-				}
-				lastIdx = i + 1
-			}
-		case BACKTICK_BYTE:
-			if state == stateBacktick {
-				state = stateNormal
-			} else if state == stateNormal {
-				state = stateBacktick
-			}
+			buf = append(buf, '\'')
+		default:
+			return "", driver.ErrSkip
 		}
-		lastChar = currentChar
+
+		if len(buf)+4 > mc.maxAllowedPacket {
+			return "", driver.ErrSkip
+		}
 	}
-	buf = append(buf, query[lastIdx:]...)
 	if argPos != len(args) {
 		return "", driver.ErrSkip
 	}
@@ -463,19 +370,19 @@ func (mc *mysqlConn) exec(query string) error {
 	}
 
 	// Read Result
-	resLen, _, err := handleOk.readResultSetHeaderPacket()
+	resLen, err := handleOk.readResultSetHeaderPacket()
 	if err != nil {
 		return err
 	}
 
 	if resLen > 0 {
 		// columns
-		if err := mc.skipColumns(resLen); err != nil {
+		if err := mc.readUntilEOF(); err != nil {
 			return err
 		}
 
 		// rows
-		if err := mc.skipRows(); err != nil {
+		if err := mc.readUntilEOF(); err != nil {
 			return err
 		}
 	}
@@ -512,7 +419,7 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 
 	// Read Result
 	var resLen int
-	resLen, _, err = handleOk.readResultSetHeaderPacket()
+	resLen, err = handleOk.readResultSetHeaderPacket()
 	if err != nil {
 		return nil, err
 	}
@@ -532,20 +439,21 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 	}
 
 	// Columns
-	rows.rs.columns, err = mc.readColumns(resLen, nil)
+	rows.rs.columns, err = mc.readColumns(resLen)
 	return rows, err
 }
 
 // Gets the value of the given MySQL System Variable
-func (mc *mysqlConn) getSystemVar(name string) (string, error) {
+// The returned byte slice is only valid until the next read
+func (mc *mysqlConn) getSystemVar(name string) ([]byte, error) {
 	// Send command
 	handleOk := mc.clearResult()
 	if err := mc.writeCommandPacketStr(comQuery, "SELECT @@"+name); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Read Result
-	resLen, _, err := handleOk.readResultSetHeaderPacket()
+	resLen, err := handleOk.readResultSetHeaderPacket()
 	if err == nil {
 		rows := new(textRows)
 		rows.mc = mc
@@ -553,20 +461,17 @@ func (mc *mysqlConn) getSystemVar(name string) (string, error) {
 
 		if resLen > 0 {
 			// Columns
-			if err := mc.skipColumns(resLen); err != nil {
-				return "", err
+			if err := mc.readUntilEOF(); err != nil {
+				return nil, err
 			}
 		}
 
 		dest := make([]driver.Value, resLen)
 		if err = rows.readRow(dest); err == nil {
-			// Convert to string before skipRows, which may
-			// overwrite the read buffer that dest[0] points into.
-			val := string(dest[0].([]byte))
-			return val, mc.skipRows()
+			return dest[0].([]byte), mc.readUntilEOF()
 		}
 	}
-	return "", err
+	return nil, err
 }
 
 // cancel is called when the query has canceled.

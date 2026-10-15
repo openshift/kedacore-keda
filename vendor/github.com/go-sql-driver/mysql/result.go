@@ -8,8 +8,6 @@
 
 package mysql
 
-import "slices"
-
 import "database/sql/driver"
 
 // Result exposes data not available through *connection.Result.
@@ -44,9 +42,9 @@ func (res *mysqlResult) RowsAffected() (int64, error) {
 }
 
 func (res *mysqlResult) AllLastInsertIds() []int64 {
-	return slices.Clone(res.insertIds) // defensive copy
+	return append([]int64{}, res.insertIds...) // defensive copy
 }
 
 func (res *mysqlResult) AllRowsAffected() []int64 {
-	return slices.Clone(res.affectedRows) // defensive copy
+	return append([]int64{}, res.affectedRows...) // defensive copy
 }

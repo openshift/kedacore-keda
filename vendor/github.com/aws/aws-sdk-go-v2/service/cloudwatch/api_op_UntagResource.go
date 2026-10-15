@@ -10,8 +10,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Removes one or more tags from the specified resource. Currently, alarms,
-// dashboards, metric streams and Contributor Insights rules support tagging.
+// Removes one or more tags from the specified resource.
 func (c *Client) UntagResource(ctx context.Context, params *UntagResourceInput, optFns ...func(*Options)) (*UntagResourceOutput, error) {
 	if params == nil {
 		params = &UntagResourceInput{}
@@ -36,12 +35,6 @@ type UntagResourceInput struct {
 	//
 	// The ARN format of a Contributor Insights rule is
 	// arn:aws:cloudwatch:Region:account-id:insight-rule/insight-rule-name
-	//
-	// The ARN format of a dashboard is
-	// arn:aws:cloudwatch::account-id:dashboard/dashboard-name
-	//
-	// The ARN format of a metric stream is
-	// arn:aws:cloudwatch:Region:account-id:metric-stream/metric-stream-name
 	//
 	// For more information about ARN format, see [Resource Types Defined by Amazon CloudWatch] in the Amazon Web Services General
 	// Reference.

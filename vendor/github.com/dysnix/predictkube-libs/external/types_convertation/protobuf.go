@@ -8,20 +8,21 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/dysnix/predictkube-proto/external/proto/enums"
+	tspb "github.com/golang/protobuf/ptypes/timestamp"
 )
 
 var (
 	TimeIsEmptyOrZero = errors.New("time parameter is empty or zero")
 )
 
-func AdaptTimeToPbTimestamp(currentTime *time.Time) (*timestamppb.Timestamp, error) {
+func AdaptTimeToPbTimestamp(currentTime *time.Time) (*tspb.Timestamp, error) {
 	if currentTime != nil && !(*currentTime).IsZero() {
 		return timestamppb.New(TimePtrToTime(currentTime)), nil
 	}
 	return nil, TimeIsEmptyOrZero
 }
 
-func AdaptPbTimestampToTime(protoTime *timestamppb.Timestamp) (*time.Time, error) {
+func AdaptPbTimestampToTime(protoTime *tspb.Timestamp) (*time.Time, error) {
 	if protoTime == nil || (protoTime.GetNanos() == 0 || protoTime.GetSeconds() == 0) {
 		return nil, fmt.Errorf("proto time parameter is empty or zero")
 	}

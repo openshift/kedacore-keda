@@ -2,13 +2,12 @@ package client
 
 import (
 	"context"
-	"sync"
 
 	_ "github.com/dysnix/predictkube-libs/external/grpc/zstd_compressor"
 	_ "google.golang.org/grpc/encoding/gzip"
 
-	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
-	"github.com/prometheus/client_golang/prometheus"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding/gzip"
@@ -19,22 +18,6 @@ import (
 	"github.com/dysnix/predictkube-libs/external/enums"
 	"github.com/dysnix/predictkube-libs/external/grpc/zstd_compressor"
 )
-
-var (
-	clientMetricsOnce sync.Once
-	clientMetrics     *grpcprom.ClientMetrics
-)
-
-// getClientMetrics returns a process-wide *grpcprom.ClientMetrics registered
-// on prometheus.DefaultRegisterer so all gRPC clients in the process share one
-// set of collectors and the existing /metrics endpoint exposes them.
-func getClientMetrics() *grpcprom.ClientMetrics {
-	clientMetricsOnce.Do(func() {
-		clientMetrics = grpcprom.NewClientMetrics(grpcprom.WithClientHandlingTimeHistogram())
-		prometheus.DefaultRegisterer.MustRegister(clientMetrics)
-	})
-	return clientMetrics
-}
 
 const (
 	DefaultMaxMsgSize = 2 << 20 // 2Mb
@@ -99,16 +82,16 @@ func SetGrpcClientOptions(conf *configs.GRPC, baseConf *configs.Base, internalIn
 		}))
 
 	if baseConf.Monitoring.Enabled {
-		m := getClientMetrics()
-		unaryClientInterceptors = append(unaryClientInterceptors, m.UnaryClientInterceptor())
-		streamClientInterceptors = append(streamClientInterceptors, m.StreamClientInterceptor())
+		unaryClientInterceptors = append(unaryClientInterceptors, grpc_prometheus.UnaryClientInterceptor)
+		streamClientInterceptors = append(streamClientInterceptors, grpc_prometheus.StreamClientInterceptor)
 	}
 
 	unaryClientInterceptors = append(unaryClientInterceptors, internalInterceptors...)
 
 	options = append(options,
-		grpc.WithChainUnaryInterceptor(unaryClientInterceptors...),
-		grpc.WithChainStreamInterceptor(streamClientInterceptors...),
+		grpc.WithUnaryInterceptor(grpc_middleware.ChainUnaryClient(
+			unaryClientInterceptors...,
+		)),
 	)
 
 	return options, err
