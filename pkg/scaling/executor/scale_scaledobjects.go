@@ -24,8 +24,10 @@ import (
 
 	"github.com/go-logr/logr"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/kedacore/keda/v2/pkg/eventreason"
@@ -110,7 +112,76 @@ func (e *scaleExecutor) RequestScale(ctx context.Context, scaledObject *kedav1al
 			logger.V(1).Info("ScaleTarget no change")
 		}
 	}
+	e.checkHPAHealth(ctx, logger, scaledObject, &result)
+
 	return result
+}
+
+// checkHPAHealth checks the HPA's health and sets the ScaledObject-only HPAActive condition
+// accordingly. It mirrors the HPA's own ScalingActive condition and does not read or mutate the
+// Ready condition: Ready reflects ScaledObject-level validity only, while HPAActive reflects the
+// HPA's operational health.
+//
+// If the HPA cannot currently be observed (no HPA yet, a transient read error, or the HPA hasn't
+// reported a ScalingActive condition yet), HPAActive is left completely untouched so the last
+// genuinely observed state persists until the HPA can be read again.
+func (e *scaleExecutor) checkHPAHealth(ctx context.Context, logger logr.Logger, scaledObject *kedav1alpha1.ScaledObject, result *ScaleResult) {
+	status, reason, message := e.getHPAHealth(ctx, logger, scaledObject)
+	if status == "" {
+		return
+	}
+	result.Conditions.SetHPAActiveCondition(status, reason, message)
+}
+
+// getHPAHealth inspects the HPA's ScalingActive condition to determine HPA health. It returns a
+// tri-state result:
+//   - metav1.ConditionTrue: the HPA is healthy - either actively scaling (reason
+//     ScaledObjectConditionHPAActiveReason) or intentionally idle because KEDA has scaled the
+//     target to zero (reason ScaledObjectConditionHPAScalingDisabledReason).
+//   - metav1.ConditionFalse: the HPA is unhealthy. The HPA's own cond.Reason is passed through as-is
+//     so downstream tooling can filter on the specific reason (e.g. FailedGetExternalMetric);
+//     ScaledObjectConditionHPAMetricsUnavailableReason is used as a fallback only when the HPA
+//     reports an empty reason.
+//   - "" (empty status): the HPA could not be observed on this reconcile (no HPA yet, a transient
+//     read error, or the HPA hasn't reported a ScalingActive condition yet). This is distinct from
+//     "healthy" - callers must not treat it as such.
+func (e *scaleExecutor) getHPAHealth(ctx context.Context, logger logr.Logger, scaledObject *kedav1alpha1.ScaledObject) (status metav1.ConditionStatus, reason string, message string) {
+	hpaName := scaledObject.Status.HpaName
+	if hpaName == "" {
+		logger.V(1).Info("HPA name not found in ScaledObject status, skipping health check")
+		return "", "", ""
+	}
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+	err := e.client.Get(ctx, types.NamespacedName{Name: hpaName, Namespace: scaledObject.Namespace}, hpa)
+	if err != nil {
+		logger.Error(err, "Could not read HPA status, skipping health check")
+		return "", "", ""
+	}
+
+	// Check HPA's ScalingActive condition
+	for _, cond := range hpa.Status.Conditions {
+		if cond.Type != autoscalingv2.ScalingActive {
+			continue
+		}
+		switch {
+		case cond.Status == corev1.ConditionTrue:
+			return metav1.ConditionTrue, kedav1alpha1.ScaledObjectConditionHPAActiveReason, "HPA is actively scaling"
+		case cond.Reason == "ScalingDisabled":
+			// KEDA manages scale-to-zero; HPA disables itself at 0 replicas.
+			return metav1.ConditionTrue, kedav1alpha1.ScaledObjectConditionHPAScalingDisabledReason, cond.Message
+		default:
+			hpaReason := cond.Reason
+			if hpaReason == "" {
+				hpaReason = kedav1alpha1.ScaledObjectConditionHPAMetricsUnavailableReason
+			}
+			msg := fmt.Sprintf("HPA is not actively scaling: %s", cond.Message)
+			return metav1.ConditionFalse, hpaReason, msg
+		}
+	}
+
+	logger.V(1).Info("HPA has not yet reported a ScalingActive condition, skipping health check")
+	return "", "", ""
 }
 
 // An object will be scaled down to 0 only if it's passed its cooldown period
@@ -153,11 +224,11 @@ func (e *scaleExecutor) scaleToZeroOrIdle(ctx context.Context, logger logr.Logge
 			}
 			logger.Info(msg, "Original Replicas Count", currentReplicas, "New Replicas Count", scaleToReplicas)
 
-			e.recorder.Eventf(scaledObject, corev1.EventTypeNormal, eventreason.KEDAScaleTargetDeactivated,
+			e.recorder.Eventf(scaledObject, nil, corev1.EventTypeNormal, eventreason.KEDAScaleTargetDeactivated, eventreason.KEDAScaleTargetDeactivated,
 				"Deactivated %s %s/%s from %d to %d", scaledObject.Status.ScaleTargetKind, scaledObject.Namespace, scaledObject.Spec.ScaleTargetRef.Name, currentReplicas, scaleToReplicas)
 			result.Conditions.SetActiveCondition(metav1.ConditionFalse, "ScalerNotActive", "Scaling is not performed because triggers are not active")
 		} else {
-			e.recorder.Eventf(scaledObject, corev1.EventTypeWarning, eventreason.KEDAScaleTargetDeactivationFailed,
+			e.recorder.Eventf(scaledObject, nil, corev1.EventTypeWarning, eventreason.KEDAScaleTargetDeactivationFailed, eventreason.KEDAScaleTargetDeactivationFailed,
 				"Failed to deactivate %s %s/%s from %d to %d", scaledObject.Status.ScaleTargetKind, scaledObject.Namespace, scaledObject.Spec.ScaleTargetRef.Name, currentReplicas, scaleToReplicas)
 		}
 	} else {
@@ -209,17 +280,12 @@ func (e *scaleExecutor) scaleFromZeroOrIdle(ctx context.Context, logger logr.Log
 			)
 		}
 
-		e.recorder.Event(
-			scaledObject,
-			corev1.EventTypeNormal,
-			eventreason.KEDAScaleTargetActivated,
-			eventMessage,
-		)
+		e.recorder.Eventf(scaledObject, nil, corev1.EventTypeNormal, eventreason.KEDAScaleTargetActivated, eventreason.KEDAScaleTargetActivated, "%s", eventMessage)
 
 		// Scale was successful. Record lastActiveTime in the result for the handler to persist.
 		result.LastActiveTime = &metav1.Time{Time: time.Now()}
 	} else {
-		e.recorder.Eventf(scaledObject, corev1.EventTypeWarning, eventreason.KEDAScaleTargetActivationFailed, "Failed to scale %s %s/%s from %d to %d", scaledObject.Status.ScaleTargetKind, scaledObject.Namespace, scaledObject.Spec.ScaleTargetRef.Name, currentReplicas, replicas)
+		e.recorder.Eventf(scaledObject, nil, corev1.EventTypeWarning, eventreason.KEDAScaleTargetActivationFailed, eventreason.KEDAScaleTargetActivationFailed, "Failed to scale %s %s/%s from %d to %d", scaledObject.Status.ScaleTargetKind, scaledObject.Namespace, scaledObject.Spec.ScaleTargetRef.Name, currentReplicas, replicas)
 	}
 }
 

@@ -7,6 +7,8 @@ testCategories:
     tests:
       - eventemitter/azureeventgridtopic
       - global_custom_ca
+      # Requires Azure Storage credentials unavailable in OpenShift CI.
+      - scaling_strategies/accurate_scaling_strategy
   scalers:
     mode: include
     tests:

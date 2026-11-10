@@ -19,6 +19,7 @@ package resolver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
+	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1123,4 +1125,272 @@ func TestReadAuthParamsFromFile_Errors(t *testing.T) {
 	_, err = readAuthParamsFromFile("../test.json")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "filePath must be relative")
+}
+
+// TestGetCurrentReplicas_NilScaleTargetGVKR verifies that GetCurrentReplicas
+// does not panic when scaledObject.Status.ScaleTargetGVKR is nil, which can
+// happen due to the cache race documented at
+// https://github.com/kedacore/keda/issues/4389 (tracking #4955).
+func TestGetCurrentReplicas_NilScaleTargetGVKR(t *testing.T) {
+	if err := appsv1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("failed to add appsv1 to scheme: %v", err)
+	}
+	if err := kedav1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("failed to add kedav1alpha1 to scheme: %v", err)
+	}
+
+	const soName = "so-nil-gvkr"
+	const soNamespace = "test-ns"
+	const deploymentName = "target-dep"
+	const stsName = "target-sts"
+	const rsName = "target-rs"
+	replicas := int32(3)
+
+	populatedGVKR := &kedav1alpha1.GroupVersionKindResource{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "Deployment",
+	}
+	populatedGVKRSts := &kedav1alpha1.GroupVersionKindResource{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "StatefulSet",
+	}
+	populatedGVKRRs := &kedav1alpha1.GroupVersionKindResource{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "ReplicaSet",
+	}
+
+	tests := []struct {
+		name         string
+		existing     []runtime.Object
+		wantReplicas int32
+		wantErr      bool
+		wantErrMsg   string
+	}{
+		{
+			name: "nil GVKR on input, refetch returns populated GVKR (Deployment path)",
+			existing: []runtime.Object{
+				&kedav1alpha1.ScaledObject{
+					ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+					Spec: kedav1alpha1.ScaledObjectSpec{
+						ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: deploymentName},
+					},
+					Status: kedav1alpha1.ScaledObjectStatus{ScaleTargetGVKR: populatedGVKR},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: soNamespace},
+					Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				},
+			},
+			wantReplicas: replicas,
+		},
+		{
+			name: "deployment with nil spec.replicas defaults to 1",
+			existing: []runtime.Object{
+				&kedav1alpha1.ScaledObject{
+					ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+					Spec: kedav1alpha1.ScaledObjectSpec{
+						ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: deploymentName},
+					},
+					Status: kedav1alpha1.ScaledObjectStatus{ScaleTargetGVKR: populatedGVKR},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: soNamespace},
+					Spec:       appsv1.DeploymentSpec{Replicas: nil},
+				},
+			},
+			wantReplicas: 1,
+		},
+		{
+			name: "statefulset with nil spec.replicas defaults to 1",
+			existing: []runtime.Object{
+				&kedav1alpha1.ScaledObject{
+					ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+					Spec: kedav1alpha1.ScaledObjectSpec{
+						ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: stsName},
+					},
+					Status: kedav1alpha1.ScaledObjectStatus{ScaleTargetGVKR: populatedGVKRSts},
+				},
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{Name: stsName, Namespace: soNamespace},
+					Spec:       appsv1.StatefulSetSpec{Replicas: nil},
+				},
+			},
+			wantReplicas: 1,
+		},
+		{
+			name: "replicaset with nil spec.replicas defaults to 1",
+			existing: []runtime.Object{
+				&kedav1alpha1.ScaledObject{
+					ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+					Spec: kedav1alpha1.ScaledObjectSpec{
+						ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: rsName},
+					},
+					Status: kedav1alpha1.ScaledObjectStatus{ScaleTargetGVKR: populatedGVKRRs},
+				},
+				&appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: soNamespace},
+					Spec:       appsv1.ReplicaSetSpec{Replicas: nil},
+				},
+			},
+			wantReplicas: 1,
+		},
+		{
+			name: "nil GVKR on input, refetch also has nil GVKR",
+			existing: []runtime.Object{
+				&kedav1alpha1.ScaledObject{
+					ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+					Spec: kedav1alpha1.ScaledObjectSpec{
+						ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: deploymentName},
+					},
+				},
+			},
+			wantErr:    true,
+			wantErrMsg: "probably invalid ScaledObject cache",
+		},
+		{
+			name:     "nil GVKR on input, refetch fails (ScaledObject not in cache)",
+			existing: []runtime.Object{},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
+				WithRuntimeObjects(tt.existing...).
+				Build()
+
+			input := &kedav1alpha1.ScaledObject{
+				ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: soNamespace},
+				Spec: kedav1alpha1.ScaledObjectSpec{
+					ScaleTargetRef: &kedav1alpha1.ScaleTarget{Name: deploymentName},
+				},
+			}
+
+			got, err := GetCurrentReplicas(context.Background(), kubeClient, nil, input)
+
+			if tt.wantErr {
+				assert.Error(t, err, "expected error")
+				if tt.wantErrMsg != "" && err != nil {
+					assert.Contains(t, err.Error(), tt.wantErrMsg)
+				}
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantReplicas, got)
+		})
+	}
+}
+func TestResolveAuthSecret_RestrictedAccess_UsesKedaNamespace(t *testing.T) {
+	origRestrictSecretAccess := restrictSecretAccess
+	origKedaNamespace := kedaNamespace
+	defer func() {
+		restrictSecretAccess = origRestrictSecretAccess
+		kedaNamespace = origKedaNamespace
+	}()
+
+	tests := []struct {
+		name           string
+		secretExists   bool
+		secretName     string
+		secretKey      string
+		secretValue    string
+		inputNamespace string
+		expectedResult string
+	}{
+		{
+			name:           "restricted access, secret found in keda namespace",
+			secretExists:   true,
+			secretName:     secretName,
+			secretKey:      secretKey,
+			secretValue:    secretData,
+			inputNamespace: "my-app",
+			expectedResult: secretData,
+		},
+		{
+			name:           "restricted access, secret not found in keda namespace",
+			secretExists:   false,
+			secretName:     secretName,
+			secretKey:      secretKey,
+			inputNamespace: "my-app",
+			expectedResult: "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			restrictSecretAccess = "true"
+			kedaNamespace = "keda"
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockSecretNamespaceLister := mock_v1.NewMockSecretNamespaceLister(ctrl)
+			mockSecretLister := mock_v1.NewMockSecretLister(ctrl)
+
+			mockSecretLister.EXPECT().Secrets(kedaNamespace).Return(mockSecretNamespaceLister).Times(1)
+
+			if test.secretExists {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: kedaNamespace,
+						Name:      test.secretName,
+					},
+					Data: map[string][]byte{test.secretKey: []byte(test.secretValue)},
+				}
+				mockSecretNamespaceLister.EXPECT().Get(test.secretName).Return(secret, nil).Times(1)
+			} else {
+				mockSecretNamespaceLister.EXPECT().Get(test.secretName).Return(nil, fmt.Errorf("secret %q not found", test.secretName)).Times(1)
+			}
+
+			ctx := context.Background()
+			result := resolveAuthSecret(
+				ctx,
+				fake.NewClientBuilder().Build(),
+				logf.Log.WithName("test"),
+				test.secretName,
+				test.inputNamespace,
+				test.secretKey,
+				mockSecretLister,
+			)
+
+			assert.Equal(t, test.expectedResult, result)
+		})
+	}
+}
+
+func TestResolveAuthSecret_UnrestrictedAccess_UsesOriginalNamespace(t *testing.T) {
+	origRestrictSecretAccess := restrictSecretAccess
+	defer func() {
+		restrictSecretAccess = origRestrictSecretAccess
+	}()
+
+	restrictSecretAccess = ""
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      secretName,
+		},
+		Data: map[string][]byte{secretKey: []byte(secretData)},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(secret).Build()
+
+	ctx := context.Background()
+	result := resolveAuthSecret(
+		ctx,
+		fakeClient,
+		logf.Log.WithName("test"),
+		secretName,
+		namespace,
+		secretKey,
+		nil,
+	)
+
+	assert.Equal(t, secretData, result)
 }

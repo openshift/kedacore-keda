@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,8 +37,6 @@ import (
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/scale"
 	"k8s.io/utils/ptr"
-	"knative.dev/pkg/apis/duck"
-	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -58,6 +57,29 @@ const (
 	statefulSetKind       = "StatefulSet"
 	replicaSetKind        = "ReplicaSet"
 )
+
+// podSpecable is a local duck type matching the PodSpecable shape used by
+// Knative and most Kubernetes workload resources. It allows extracting a
+// PodTemplateSpec from arbitrary custom resources via JSON round-tripping.
+type podSpecable struct {
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec podSpecableSpec `json:"spec,omitempty"`
+}
+
+type podSpecableSpec struct {
+	Template corev1.PodTemplateSpec `json:"template,omitempty"`
+}
+
+// fromUnstructured converts an unstructured Kubernetes object into a typed
+// struct by JSON round-tripping.
+func fromUnstructured(obj *unstructured.Unstructured, target interface{}) error {
+	raw, err := obj.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
+}
 
 var (
 	globalConfig                      = Config{}
@@ -90,6 +112,28 @@ func isSecretAccessRestricted(logger logr.Logger) bool {
 	return boolFalse
 }
 
+// ensureScaleTargetGVKR returns scaledObject unchanged if its Status.ScaleTargetGVKR is
+// already populated. If it is nil (informer-cache race, see issues #4389 / #4955) the
+// function re-fetches the object from the API server and returns the fresh copy. If the
+// GVKR is still nil after re-fetch, an error is returned so callers never dereference a
+// nil pointer.
+func ensureScaleTargetGVKR(ctx context.Context, kubeClient client.Client, scaledObject *kedav1alpha1.ScaledObject) (*kedav1alpha1.ScaledObject, error) {
+	if scaledObject.Status.ScaleTargetGVKR != nil {
+		return scaledObject, nil
+	}
+	fresh := &kedav1alpha1.ScaledObject{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: scaledObject.Name, Namespace: scaledObject.Namespace}, fresh); err != nil {
+		log.Error(err, "failed to get ScaledObject", "name", scaledObject.Name, "namespace", scaledObject.Namespace)
+		return nil, err
+	}
+	if fresh.Status.ScaleTargetGVKR == nil {
+		err := fmt.Errorf("failed to get ScaledObject.Status.ScaleTargetGVKR, probably invalid ScaledObject cache")
+		log.Error(err, "ScaleTargetGVKR still nil after re-fetch", "scaledObject.Name", fresh.Name, "scaledObject.Namespace", fresh.Namespace)
+		return nil, err
+	}
+	return fresh, nil
+}
+
 // ResolveScaleTargetPodSpec for given scalableObject inspects the scale target workload,
 // which could be almost any k8s resource (Deployment, StatefulSet, CustomResource...)
 // and for the given resource returns *corev1.PodTemplateSpec and a name of the container
@@ -103,18 +147,9 @@ func ResolveScaleTargetPodSpec(ctx context.Context, kubeClient client.Client, sc
 		// trying to prevent operator crashes, due to some race condition, sometimes obj.Status.ScaleTargetGVKR is nil
 		// see https://github.com/kedacore/keda/issues/4389
 		// Tracking issue: https://github.com/kedacore/keda/issues/4955
-		if obj.Status.ScaleTargetGVKR == nil {
-			scaledObject := &kedav1alpha1.ScaledObject{}
-			err := kubeClient.Get(ctx, types.NamespacedName{Name: obj.Name, Namespace: obj.Namespace}, scaledObject)
-			if err != nil {
-				log.Error(err, "failed to get ScaledObject", "name", obj.Name, "namespace", obj.Namespace)
-				return nil, "", err
-			}
-			obj = scaledObject
-		}
-		if obj.Status.ScaleTargetGVKR == nil {
-			err := fmt.Errorf("failed to get ScaledObject.Status.ScaleTargetGVKR, probably invalid ScaledObject cache")
-			log.Error(err, "failed to get ScaledObject.Status.ScaleTargetGVKR, probably invalid ScaledObject cache", "scaledObject.Name", obj.Name, "scaledObject.Namespace", obj.Namespace)
+		var err error
+		obj, err = ensureScaleTargetGVKR(ctx, kubeClient, obj)
+		if err != nil {
 			return nil, "", err
 		}
 
@@ -151,8 +186,8 @@ func ResolveScaleTargetPodSpec(ctx context.Context, kubeClient client.Client, sc
 				logger.Error(err, "target resource doesn't exist")
 				return nil, "", err
 			}
-			withPods := &duckv1.WithPod{}
-			if err := duck.FromUnstructured(unstruct, withPods); err != nil {
+			withPods := &podSpecable{}
+			if err := fromUnstructured(unstruct, withPods); err != nil {
 				logger.Error(err, "cannot convert Unstructured into PodSpecable Duck-type", "object", unstruct)
 			}
 			podTemplateSpec.ObjectMeta = withPods.ObjectMeta
@@ -385,6 +420,33 @@ func resolveAuthRef(ctx context.Context, client client.Client, logger logr.Logge
 			if triggerAuthSpec.BoundServiceAccountToken != nil {
 				for _, e := range triggerAuthSpec.BoundServiceAccountToken {
 					result[e.Parameter] = resolveBoundServiceAccountToken(ctx, client, logger, triggerNamespace, &e, authClientSet)
+				}
+			}
+			if triggerAuthSpec.OAuth2 != nil {
+				oauth2Config := triggerAuthSpec.OAuth2
+
+				clientSecretName := oauth2Config.ClientSecret.ValueFrom.SecretKeyRef.Name
+				clientSecretKey := oauth2Config.ClientSecret.ValueFrom.SecretKeyRef.Key
+				clientSecret := resolveAuthSecret(ctx, client, logger, clientSecretName,
+					triggerNamespace, clientSecretKey,
+					authClientSet.SecretLister)
+
+				result["oauthTokenURI"] = oauth2Config.TokenURL
+				result["clientID"] = oauth2Config.ClientID
+				result["clientSecret"] = clientSecret
+
+				// Convert scopes array to comma-separated string (for compatibility)
+				if len(oauth2Config.Scopes) > 0 {
+					result["scopes"] = strings.Join(oauth2Config.Scopes, ",")
+				}
+
+				// URL-encode additional token endpoint parameters
+				if len(oauth2Config.TokenURLParams) > 0 {
+					endpointParams := url.Values{}
+					for k, v := range oauth2Config.TokenURLParams {
+						endpointParams.Add(k, v)
+					}
+					result["endpointParams"] = endpointParams.Encode()
 				}
 			}
 		}
@@ -628,13 +690,15 @@ func resolveAuthSecret(ctx context.Context, client client.Client, logger logr.Lo
 
 	secret := &corev1.Secret{}
 	var err error
+	resolvedNamespace := namespace
 	if isSecretAccessRestricted(logger) {
 		secret, err = secretsLister.Secrets(kedaNamespace).Get(name)
+		resolvedNamespace = kedaNamespace
 	} else {
 		err = client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret)
 	}
 	if err != nil {
-		logger.Error(err, "error trying to get secret from namespace", "Secret.Namespace", namespace, "Secret.Name", name)
+		logger.Error(err, "error trying to get secret from namespace", "Secret.Namespace", resolvedNamespace, "Secret.Name", name)
 		return ""
 	}
 	result := secret.Data[key]
@@ -724,6 +788,15 @@ func resolveServiceAccountAnnotation(ctx context.Context, client client.Client, 
 
 // GetCurrentReplicas returns the current replica count for a ScaledObject
 func GetCurrentReplicas(ctx context.Context, client client.Client, scaleClient scale.ScalesGetter, scaledObject *kedav1alpha1.ScaledObject) (int32, error) {
+	// trying to prevent operator crashes, due to some race condition, sometimes scaledObject.Status.ScaleTargetGVKR is nil
+	// see https://github.com/kedacore/keda/issues/4389
+	// Tracking issue: https://github.com/kedacore/keda/issues/4955
+	var err error
+	scaledObject, err = ensureScaleTargetGVKR(ctx, client, scaledObject)
+	if err != nil {
+		return 0, err
+	}
+
 	targetName := scaledObject.Spec.ScaleTargetRef.Name
 	targetGVKR := scaledObject.Status.ScaleTargetGVKR
 
@@ -741,21 +814,21 @@ func GetCurrentReplicas(ctx context.Context, client client.Client, scaleClient s
 			logger.Error(err, "target deployment doesn't exist")
 			return 0, err
 		}
-		return *deployment.Spec.Replicas, nil
+		return ptr.Deref(deployment.Spec.Replicas, 1), nil
 	case targetGVKR.Group == appsGroup && targetGVKR.Kind == statefulSetKind:
 		statefulSet := &appsv1.StatefulSet{}
 		if err := client.Get(ctx, types.NamespacedName{Name: targetName, Namespace: scaledObject.Namespace}, statefulSet); err != nil {
 			logger.Error(err, "target statefulset doesn't exist")
 			return 0, err
 		}
-		return *statefulSet.Spec.Replicas, nil
+		return ptr.Deref(statefulSet.Spec.Replicas, 1), nil
 	case targetGVKR.Group == appsGroup && targetGVKR.Kind == replicaSetKind:
 		replicaSet := &appsv1.ReplicaSet{}
 		if err := client.Get(ctx, types.NamespacedName{Name: targetName, Namespace: scaledObject.Namespace}, replicaSet); err != nil {
 			logger.Error(err, "target replicaset doesn't exist")
 			return 0, err
 		}
-		return *replicaSet.Spec.Replicas, nil
+		return ptr.Deref(replicaSet.Spec.Replicas, 1), nil
 	default:
 		// Try reading from the informer cache via Unstructured to avoid an API call.
 		unstruct := &unstructured.Unstructured{}
